@@ -1,0 +1,11 @@
+# Privacy and security launch gates
+- Treat discovery, qualification, verification and marketing permission as separate states.
+- Minimise personal information; record source, purpose, observation date and permitted use.
+- Do not treat public visibility as marketing consent.
+- Check suppression and withdrawal before applicable outreach.
+- Keep sensitive client data tenant-isolated and out of general logs/analytics.
+- Never expose provider secrets or database credentials in browser code.
+- Use scoped, revocable API credentials.
+- Test cross-tenant access and export authorisation.
+- Define retention, correction, deletion, incident response and recovery.
+- Review POPIA, direct-marketing rules and sector requirements before production.

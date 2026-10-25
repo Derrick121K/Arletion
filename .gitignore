@@ -1,0 +1,47 @@
+node_modules/
+.next/
+.next-arletion/
+.env
+.env.*
+!.env.example
+.venv/
+.test-pgdata/
+.test-pg.log
+__pycache__/
+*.pyc
+.arletion-latest-build.json
+.next-arletion-build-*/
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Next.js build output
+.next/
+**/.next/
+**/.next-*/
+**/.next-arletion*/
+
+# Generated output
+**/dist/
+**/coverage/
+**/test-results/
+**/playwright-report/
+
+# Python environments and caches
+**/.venv/
+**/venv/
+**/__pycache__/
+**/.pytest_cache/
+*.py[cod]
+
+# Environment secrets
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Logs
+*.log

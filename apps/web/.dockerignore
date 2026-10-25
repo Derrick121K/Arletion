@@ -1,0 +1,6 @@
+node_modules
+.next
+.next-arletion
+.git
+.env*
+npm-debug.log*
