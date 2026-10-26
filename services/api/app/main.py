@@ -195,7 +195,7 @@ def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
 def get_sources(session: Session = Depends(get_session)):
     result=[]
     for row in session.scalars(select(SourceRegistry).order_by(SourceRegistry.name)).all():
-        status={"approved":"enabled"}.get(row.permitted_use,row.permitted_use if row.permitted_use in {"planned","review_required","enabled","disabled"} else "planned")
+        status=("enabled" if row.enabled and row.permitted_use=="approved" else "disabled" if row.permitted_use=="approved" else row.permitted_use if row.permitted_use in {"planned","review_required","enabled","disabled"} else "planned")
         result.append(Source(id=str(row.id),name=row.name,category=row.source_type,url=row.base_url,status=status,note=row.last_error or ("Approved for reviewed imports." if row.enabled else "Review terms and coverage before enabling imports.")))
     return result
 
@@ -210,7 +210,7 @@ def create_source(payload: SourceWrite, session: Session = Depends(get_session))
         row.base_url=payload.url; row.source_type=payload.category; row.permitted_use="approved" if payload.status=="enabled" else payload.status
         row.enabled=payload.status=="enabled"; row.last_error=payload.note or None
     session.commit(); session.refresh(row)
-    status={"approved":"enabled"}.get(row.permitted_use,row.permitted_use if row.permitted_use in {"planned","review_required","enabled","disabled"} else "planned")
+    status=("enabled" if row.enabled and row.permitted_use=="approved" else "disabled" if row.permitted_use=="approved" else row.permitted_use if row.permitted_use in {"planned","review_required","enabled","disabled"} else "planned")
     return Source(id=str(row.id),name=row.name,category=row.source_type,url=row.base_url,status=status,note=row.last_error or "Review terms and coverage before enabling imports.")
 @app.get("/api/v1/opportunities")
 def get_opportunities(session: Session = Depends(get_session)):
