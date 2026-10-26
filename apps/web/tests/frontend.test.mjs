@@ -54,6 +54,31 @@ test("approved brand images are preserved and referenced by the dashboard", asyn
   assert.match(dockerfile, /\.next-arletion\/static \.\/\.next-arletion\/static/);
 });
 
+test("production dashboard uses the protected same-origin API proxy", async () => {
+  const page = await read("app/page.tsx");
+  const proxy = await read("proxy.ts");
+  const apiProxy = await read("app/api/backend/[...path]/route.ts");
+  const render = await readFile(resolve(monorepoRoot, "render.yaml"), "utf8");
+
+  assert.match(page, /const API="\\/api\\/backend"/);
+  assert.doesNotMatch(page, /NEXT_PUBLIC_API_BASE_URL/);
+  assert.match(proxy, /ARLETION_BASIC_AUTH_USER/);
+  assert.match(proxy, /ARLETION_BASIC_AUTH_PASSWORD/);
+  assert.match(apiProxy, /ARLETION_API_KEY/);
+  assert.match(apiProxy, /api\\/v1/);
+  assert.match(render, /ARLETION_REQUIRE_API_KEY/);
+  assert.match(render, /property: hostport/);
+  assert.match(render, /sync: false/);
+});
+
+test("opportunities page offers a date-bounded official import", async () => {
+  const page = await read("app/page.tsx");
+  assert.match(page, /Import official eTender page/);
+  assert.match(page, /date_from:dateFrom/);
+  assert.match(page, /date_to:dateTo/);
+  assert.match(page, /setReloadKey\\(value=>value\\+1\\)/);
+});
+
 test("dashboard data loader reads all API summaries", async () => {
   const calls = [];
   const result = await loadDashboardData("http://127.0.0.1:8000", async (url) => {
