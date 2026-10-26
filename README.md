@@ -25,7 +25,7 @@ npm run build
 npm run start:windows -- -Port 3000
 ```
 
-`npm run dev` starts the development server instead of the production server. The frontend defaults to `http://127.0.0.1:8000` for the API. For a different API address, set `NEXT_PUBLIC_API_BASE_URL` before building because Next.js embeds this public variable in the client bundle. `start:windows` takes a port, checks for a listener, reports its process when Windows exposes it, and never terminates an existing process. If the chosen frontend port differs from 3000, add that exact origin to `ARLETION_CORS_ORIGINS` and restart the API.
+`npm run dev` starts the development server instead of the production server. The browser calls a same-origin `/api/backend` proxy; the proxy reads `ARLETION_API_BASE_URL` and `ARLETION_API_KEY` on the server, never from a `NEXT_PUBLIC_*` variable. In development, the API base defaults to `http://127.0.0.1:8000`. `start:windows` takes a port, checks for a listener, reports its process when Windows exposes it, and never terminates an existing process. Production mode requires `ARLETION_BASIC_AUTH_USER` and `ARLETION_BASIC_AUTH_PASSWORD`; set both in the server environment, not in client-side code. If the chosen frontend port differs from 3000, add that exact origin to `ARLETION_CORS_ORIGINS` and restart the API.
 
 Production builds use a unique `.next-arletion-build-*` directory and update `apps/web/.arletion-latest-build.json` only after the standalone server, public assets, and dist-directory static chunks are ready. `npm start` runs the selected standalone build. This keeps a new build from overwriting files used by a running local dashboard. The Docker image sets `ARLETION_BUILD_DIR=.next-arletion` because its builder has no active server using that path.
 
@@ -103,3 +103,33 @@ The supplied brand artwork is in `apps/web/public/`: `arletion-icon.png` is used
 Maroon `#5B0F1A`, red `#D62828`, gold `#D4AF37`, white `#FFFFFF`, black `#0B0B0B`, midnight purple `#1A0B2E`.
 Tagline: **Find • Qualify • Unlock • Grow**.
 #
+
+
+## Protected Render preview deployment
+
+A private-preview Blueprint is provided in render.yaml. It creates the web frontend, FastAPI service and PostgreSQL database, generates a server-side API key, protects the dashboard with HTTP Basic authentication, and requires the API key for all /api/v1/* requests. The web server proxies dashboard API requests server-side; no API key is exposed to browser JavaScript.
+
+**This is a private preview, not production hosting.** The Blueprint uses Render Free services and a Free Postgres database. Render documents that free web services can spin down and that free Postgres databases expire after 30 days, have no backups and are unsuitable for production. Do not store client leads, consumer enquiries or other sensitive data in this preview database. See https://render.com/docs/free.
+
+### Deploy the preview
+
+1. Push or merge the reviewed deployment branch to the repository branch you intend to deploy.
+2. Sign in to https://dashboard.render.com/ and connect the GitHub account that owns Derrick121K/Arletion.
+3. Choose New → Blueprint, select this repository and review render.yaml.
+4. Confirm the free database's 30-day expiry warning before creating resources.
+5. When prompted for ARLETION_BASIC_AUTH_USER and ARLETION_BASIC_AUTH_PASSWORD, enter strong unique credentials and save them in Render's secret configuration. Never commit them.
+6. Create the services and wait for both the API /health check and frontend /healthz check to pass.
+7. Open the frontend URL; the browser should prompt for Basic Auth. Confirm /healthz returns 200, the browser cannot access the dashboard without credentials, and the dashboard loads through the server-side API proxy.
+8. Verify that direct API calls to /api/v1/* without the generated bearer key return 401.
+9. Keep the database empty during this preview. Before production, move to a durable PostgreSQL plan/provider with backups, implement real user accounts and tenant-level authorization, and run the security/restore checks.
+
+The API health route /live is liveness only. /health checks the database schema and migration revision. Frontend /healthz is a process health check and does not claim that the API/database is ready.
+
+### Deployment architecture
+
+- arletion-web: Next.js frontend, Basic Auth gate and server-side API proxy.
+- arletion-api: FastAPI service, database migrations at startup and bearer API-key protection.
+- arletion-db: PostgreSQL, connected through Render's private network.
+- .github/workflows/ci.yml: builds/tests the frontend and runs API integration tests against a disposable PostgreSQL service on GitHub Actions.
+
+The deployment Blueprint is intentionally a preview guardrail. Basic Auth is a shared workspace gate, not a substitute for real individual accounts, tenant membership, session management, CSRF protections for browser mutation flows, or production authorization review.
