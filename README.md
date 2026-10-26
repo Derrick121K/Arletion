@@ -63,12 +63,6 @@ Push-Location services\api
 Pop-Location
 ```
 
-Before starting the API, apply the migration once from the same `services\api` directory:
-
-```powershell
-..\..\.venv\Scripts\alembic.exe upgrade head
-```
-
 Check `http://127.0.0.1:8000/health` and `http://127.0.0.1:8000/docs`. Health returns HTTP 503 and a database diagnostic when `DATABASE_URL` is missing, unreachable or not migrated; the API does not silently fall back to fixtures. If port 8000 is occupied, identify its listener before stopping anything. `ARLETION_CORS_ORIGINS` is a comma-separated allowlist; defaults permit the two local dashboard origins on port 3000. For example, add `http://127.0.0.1:3011,http://localhost:3011` when using that frontend port.
 
 Campaigns, leads and sources can be written through their versioned POST endpoints; campaigns also support PATCH. Opportunity records are upserted by source ID, so repeat imports do not create duplicate rows. The dashboard reads these records from the API.
