@@ -26,7 +26,7 @@ app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials
 async def require_api_key_in_protected_deployments(request, call_next):
     """Require a server-side bearer key for data APIs in configured deployments."""
     required = os.getenv("ARLETION_REQUIRE_API_KEY", "false").strip().lower() == "true"
-    if required and request.url.path.startswith("/api/v1/"):
+    if required and request.method != "OPTIONS" and request.url.path.startswith("/api/v1/"):
         expected = os.getenv("ARLETION_API_KEY", "")
         if not expected:
             return JSONResponse(
