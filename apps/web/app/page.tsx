@@ -4,7 +4,7 @@ import {Activity,BarChart3,Building2,CheckCircle2,ChevronRight,Database,FileSear
 import Image from "next/image";
 import {loadDashboardData} from "./dashboard-api.mjs";
 import type {Campaign,Lead,Opportunity,Source} from "./dashboard-api.mjs";
-const API=process.env.NEXT_PUBLIC_API_BASE_URL||"http://127.0.0.1:8000";
+const API="/api/backend";
 export default function Home(){
  const [page,setPage]=useState("Overview"),[campaigns,setCampaigns]=useState<Campaign[]>([]),[leads,setLeads]=useState<Lead[]>([]),[sources,setSources]=useState<Source[]>([]),[opportunities,setOpportunities]=useState<Opportunity[]>([]),[summary,setSummary]=useState({campaigns:0,leads:0,sources:0,qualified:0,demo_mode:false}),[query,setQuery]=useState(""),[type,setType]=useState("all"),[apiState,setApiState]=useState("CONNECTING"),[apiError,setApiError]=useState(""),[reloadKey,setReloadKey]=useState(0);
  useEffect(()=>{let active=true;loadDashboardData(API).then(({campaigns:c,leads:l,sources:s,summary:m,opportunities:o})=>{if(active){setCampaigns(c);setLeads(l);setSources(s);setSummary(m);setOpportunities(o);setApiState("API CONNECTED")}}).catch(error=>{if(active){setApiState("API OFFLINE");setApiError(error instanceof Error?error.message:"Could not connect to the Arletion API.")}});return()=>{active=false}},[reloadKey]);
