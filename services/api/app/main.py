@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import hmac
 import os
 from typing import Any, Literal
 from uuid import UUID
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.responses import JSONResponse
 from .database import DEFAULT_TENANT_ID, db_health, get_session
 from .models import Campaign as CampaignRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry
 from .procurement import import_opportunities, parse_import
@@ -18,6 +20,32 @@ cors_origins = [origin.strip().rstrip("/") for origin in os.getenv(
 ).split(",") if origin.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=False,
                    allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Content-Type", "Authorization"])
+
+
+@app.middleware("http")
+async def require_api_key_in_protected_deployments(request, call_next):
+    """Require a server-side bearer key for data APIs in configured deployments."""
+    required = os.getenv("ARLETION_REQUIRE_API_KEY", "false").strip().lower() == "true"
+    if required and request.url.path.startswith("/api/v1/"):
+        expected = os.getenv("ARLETION_API_KEY", "")
+        if not expected:
+            return JSONResponse(
+                {"detail": "API authentication is not configured on this service."},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        authorization = request.headers.get("authorization", "")
+        supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            return JSONResponse(
+                {"detail": "A valid Arletion API credential is required."},
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": 'Bearer realm="Arletion API"',
+                    "Cache-Control": "no-store",
+                },
+            )
+    return await call_next(request)
 
 class Campaign(BaseModel):
     id: str; name: str; objective: str
