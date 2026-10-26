@@ -58,8 +58,8 @@ services:
 
 databases:
   - name: arletion-db
-    databaseName: arletion
-    user: arletion
+    databaseName: arletion_db
+    user: arletion_db_user
     region: frankfurt
     plan: free
     postgresMajorVersion: "16"
