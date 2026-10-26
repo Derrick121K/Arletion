@@ -1,6 +1,10 @@
 # Arletion v0.1 — Lead Intelligence
 Free-first, API-first lead discovery for South African business prospects and procurement opportunities.
 
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Derrick121K/Arletion/tree/release/deploy-hardening)
+
+**Private preview only:** this one-click setup uses Render Free Postgres, which expires after 30 days and has no backups. Do not store client data or consumer enquiries in this preview.
+
 ## Included
 - Next.js App Router + TypeScript dashboard starter
 - FastAPI API with PostgreSQL-backed campaign, lead, source, source-record and opportunity endpoints
@@ -18,7 +22,7 @@ The Arletion project root is this directory. Its root npm scripts delegate only 
 ```powershell
 Set-Location "C:\Users\Kapa\Music\Arletion\arletion-v0.1"
 npm install --package-lock-only --prefix apps/web --no-audit --no-fund
- npm ci --prefix apps/web
+npm ci --prefix apps/web
 npm run lint
 npm run typecheck
 npm test
