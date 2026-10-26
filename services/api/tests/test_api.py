@@ -46,6 +46,21 @@ class ApiUnitTests(unittest.TestCase):
             self.assertEqual(allowed.status_code, 503)
             self.assertIn("DATABASE_URL", allowed.text)
 
+    def test_cors_preflight_reaches_cors_middleware_with_api_key_required(self):
+        with patch.dict(os.environ, {
+            "ARLETION_REQUIRE_API_KEY": "true",
+            "ARLETION_API_KEY": "test-secret-key",
+            "DATABASE_URL": "",
+            "ARLETION_TEST_DATABASE_URL": "",
+        }):
+            response = api_request("OPTIONS", "/api/v1/campaigns", headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3000")
+
     def test_liveness_does_not_claim_database_readiness(self):
         with patch.dict(os.environ, {"DATABASE_URL": "", "ARLETION_TEST_DATABASE_URL": ""}):
             live = api_request("GET", "/live")
