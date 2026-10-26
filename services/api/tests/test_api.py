@@ -136,6 +136,15 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, leads, opportunities, source_records, campaigns, organizations RESTART IDENTITY CASCADE"))
             connection.execute(text("DELETE FROM source_registry WHERE id <> '00000000-0000-0000-0000-000000000002'"))
 
+    def test_official_import_is_blocked_until_source_is_approved(self):
+        response = api_request(
+            "POST",
+            "/api/v1/opportunities/import/official",
+            json={"page_number": 1, "page_size": 1, "date_from": "2024-01-01", "date_to": "2024-01-02"},
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("not approved", response.json()["detail"].lower())
+
     def test_health_and_campaign_lead_source_crud_are_database_backed(self):
         self.assertEqual(api_request("GET", "/health").status_code, 200)
         default_sources = api_request("GET", "/api/v1/sources").json()
