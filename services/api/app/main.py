@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import hmac
 import os
 from typing import Any, Literal
 from uuid import UUID
@@ -7,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.responses import JSONResponse
 from .database import DEFAULT_TENANT_ID, db_health, get_session
 from .models import Campaign as CampaignRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry
 from .procurement import import_opportunities, parse_import
@@ -18,6 +20,32 @@ cors_origins = [origin.strip().rstrip("/") for origin in os.getenv(
 ).split(",") if origin.strip()]
 app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=False,
                    allow_methods=["GET", "POST", "PATCH", "OPTIONS"], allow_headers=["Content-Type", "Authorization"])
+
+
+@app.middleware("http")
+async def require_api_key_in_protected_deployments(request, call_next):
+    """Require a server-side bearer key for data APIs in configured deployments."""
+    required = os.getenv("ARLETION_REQUIRE_API_KEY", "false").strip().lower() == "true"
+    if required and request.method != "OPTIONS" and request.url.path.startswith("/api/v1/"):
+        expected = os.getenv("ARLETION_API_KEY", "")
+        if not expected:
+            return JSONResponse(
+                {"detail": "API authentication is not configured on this service."},
+                status_code=503,
+                headers={"Cache-Control": "no-store"},
+            )
+        authorization = request.headers.get("authorization", "")
+        supplied = authorization[7:] if authorization.startswith("Bearer ") else ""
+        if not supplied or not hmac.compare_digest(supplied, expected):
+            return JSONResponse(
+                {"detail": "A valid Arletion API credential is required."},
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": 'Bearer realm="Arletion API"',
+                    "Cache-Control": "no-store",
+                },
+            )
+    return await call_next(request)
 
 class Campaign(BaseModel):
     id: str; name: str; objective: str
@@ -167,7 +195,7 @@ def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
 def get_sources(session: Session = Depends(get_session)):
     result=[]
     for row in session.scalars(select(SourceRegistry).order_by(SourceRegistry.name)).all():
-        status={"approved":"enabled"}.get(row.permitted_use,row.permitted_use if row.permitted_use in {"planned","review_required","enabled","disabled"} else "planned")
+        status=("enabled" if row.enabled and row.permitted_use=="approved" else "disabled" if row.permitted_use=="approved" else row.permitted_use if row.permitted_use in {"planned","review_required","enabled","disabled"} else "planned")
         result.append(Source(id=str(row.id),name=row.name,category=row.source_type,url=row.base_url,status=status,note=row.last_error or ("Approved for reviewed imports." if row.enabled else "Review terms and coverage before enabling imports.")))
     return result
 
@@ -182,7 +210,7 @@ def create_source(payload: SourceWrite, session: Session = Depends(get_session))
         row.base_url=payload.url; row.source_type=payload.category; row.permitted_use="approved" if payload.status=="enabled" else payload.status
         row.enabled=payload.status=="enabled"; row.last_error=payload.note or None
     session.commit(); session.refresh(row)
-    status={"approved":"enabled"}.get(row.permitted_use,row.permitted_use if row.permitted_use in {"planned","review_required","enabled","disabled"} else "planned")
+    status=("enabled" if row.enabled and row.permitted_use=="approved" else "disabled" if row.permitted_use=="approved" else row.permitted_use if row.permitted_use in {"planned","review_required","enabled","disabled"} else "planned")
     return Source(id=str(row.id),name=row.name,category=row.source_type,url=row.base_url,status=status,note=row.last_error or "Review terms and coverage before enabling imports.")
 @app.get("/api/v1/opportunities")
 def get_opportunities(session: Session = Depends(get_session)):
@@ -212,6 +240,14 @@ def import_opportunity_file(payload: dict[str, Any], session: Session = Depends(
 
 @app.post("/api/v1/opportunities/import/official")
 def import_official_opportunities(payload: OfficialImportWrite, session: Session = Depends(get_session)):
+    source = session.scalar(select(SourceRegistry).where(
+        SourceRegistry.name == "National Treasury eTender Transparency Portal"
+    ))
+    if source is None or not source.enabled or source.permitted_use != "approved":
+        raise HTTPException(
+            status_code=409,
+            detail="The official eTender connector is not approved. Review its documented access and reuse terms in Source Registry, then explicitly approve and enable it before importing.",
+        )
     import json, urllib.error, urllib.parse, urllib.request
     params={"PageNumber":payload.page_number,"PageSize":payload.page_size}
     params["dateFrom"]=payload.date_from.isoformat()

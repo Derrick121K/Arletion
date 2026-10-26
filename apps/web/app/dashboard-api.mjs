@@ -1,7 +1,7 @@
 const endpoints = ["campaigns", "leads", "sources", "summary", "opportunities"];
 
 /** @param {string} apiBaseUrl @param {typeof fetch} fetcher @param {number} timeoutMs */
-export async function loadDashboardData(apiBaseUrl, fetcher = fetch, timeoutMs = 8000) {
+export async function loadDashboardData(apiBaseUrl, fetcher = fetch, timeoutMs = 90000) {
   const values = await Promise.all(
     endpoints.map(async (endpoint) => {
       const controller = new AbortController();

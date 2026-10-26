@@ -5,12 +5,13 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.models import Base
+from app.database import normalize_database_url
 
 config = context.config
 if config.config_file_name:
     fileConfig(config.config_file_name)
 if os.getenv("DATABASE_URL"):
-    config.set_main_option("sqlalchemy.url", os.environ["DATABASE_URL"].replace("%", "%%"))
+    config.set_main_option("sqlalchemy.url", normalize_database_url(os.environ["DATABASE_URL"]).replace("%", "%%"))
 target_metadata = Base.metadata
 
 

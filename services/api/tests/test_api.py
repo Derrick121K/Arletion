@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from app.database import engine_for_url
+from app.database import engine_for_url, normalize_database_url
 from app.main import app
 from app.models import Base
 from app.procurement import normalize_record, parse_import
@@ -18,6 +18,49 @@ def api_request(method: str, path: str, **kwargs):
 
 
 class ApiUnitTests(unittest.TestCase):
+    def test_hosted_postgres_urls_select_psycopg3(self):
+        self.assertEqual(
+            normalize_database_url("postgres://user:pass@db.example:5432/app"),
+            "postgresql+psycopg://user:pass@db.example:5432/app",
+        )
+        self.assertEqual(
+            normalize_database_url("postgresql://user:pass@db.example:5432/app"),
+            "postgresql+psycopg://user:pass@db.example:5432/app",
+        )
+        self.assertEqual(
+            normalize_database_url("postgresql+psycopg://user:pass@db.example:5432/app"),
+            "postgresql+psycopg://user:pass@db.example:5432/app",
+        )
+
+    def test_api_key_protects_data_routes_when_enabled(self):
+        with patch.dict(os.environ, {
+            "ARLETION_REQUIRE_API_KEY": "true",
+            "ARLETION_API_KEY": "test-secret-key",
+            "DATABASE_URL": "",
+            "ARLETION_TEST_DATABASE_URL": "",
+        }):
+            denied = api_request("GET", "/api/v1/campaigns")
+            self.assertEqual(denied.status_code, 401)
+            allowed = api_request("GET", "/api/v1/campaigns", headers={"Authorization": "Bearer test-secret-key"})
+            # Correct authentication reaches the database dependency, which is intentionally absent in this unit test.
+            self.assertEqual(allowed.status_code, 503)
+            self.assertIn("DATABASE_URL", allowed.text)
+
+    def test_cors_preflight_reaches_cors_middleware_with_api_key_required(self):
+        with patch.dict(os.environ, {
+            "ARLETION_REQUIRE_API_KEY": "true",
+            "ARLETION_API_KEY": "test-secret-key",
+            "DATABASE_URL": "",
+            "ARLETION_TEST_DATABASE_URL": "",
+        }):
+            response = api_request("OPTIONS", "/api/v1/campaigns", headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "GET",
+                "Access-Control-Request-Headers": "authorization",
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3000")
+
     def test_liveness_does_not_claim_database_readiness(self):
         with patch.dict(os.environ, {"DATABASE_URL": "", "ARLETION_TEST_DATABASE_URL": ""}):
             live = api_request("GET", "/live")
@@ -53,9 +96,9 @@ class ApiUnitTests(unittest.TestCase):
             "Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"
         })
         self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3000")
-        denied = api_request("GET", "/health", headers={"Origin": "https://unapproved.example"})
+        denied = api_request("GET", "/live", headers={"Origin": "https://unapproved.example"})
         self.assertNotIn("access-control-allow-origin", denied.headers)
-        self.assertEqual(denied.status_code, 503)
+        self.assertEqual(denied.status_code, 200)
 
     def test_documented_json_and_flat_csv_import_formats(self):
         package = {"releases": [{"ocid": "ocds-9t57fa-1", "id": "release-1", "date": "2030-01-01T10:00:00Z", "tender": {"title": "Road maintenance", "status": "active", "tenderPeriod": {"startDate": "2030-01-01", "endDate": "2030-02-01"}}, "buyer": {"name": "Public works"}}]}
@@ -89,10 +132,44 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
 
     def setUp(self):
         with self.engine.begin() as connection:
-            connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, leads, opportunities, source_records, source_registry, campaigns, organizations, tenants RESTART IDENTITY CASCADE"))
+            # Keep migration-seeded reference rows; clear tenant-owned/test data.
+            connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, leads, opportunities, source_records, campaigns, organizations RESTART IDENTITY CASCADE"))
+            connection.execute(text("DELETE FROM source_registry WHERE id <> '00000000-0000-0000-0000-000000000002'"))
+            connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL WHERE id = '00000000-0000-0000-0000-000000000002'"))
+
+    def test_source_can_be_explicitly_approved_after_manual_review(self):
+        response = api_request(
+            "POST",
+            "/api/v1/sources",
+            json={
+                "name": "National Treasury eTender Transparency Portal",
+                "url": "https://data.etenders.gov.za/",
+                "category": "procurement_ocds",
+                "status": "enabled",
+                "note": "Reviewed source access and reuse terms for this test.",
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["status"], "enabled")
+        persisted = {
+            source["name"]: source
+            for source in api_request("GET", "/api/v1/sources").json()
+        }["National Treasury eTender Transparency Portal"]
+        self.assertEqual(persisted["status"], "enabled")
+
+    def test_official_import_is_blocked_until_source_is_approved(self):
+        response = api_request(
+            "POST",
+            "/api/v1/opportunities/import/official",
+            json={"page_number": 1, "page_size": 1, "date_from": "2024-01-01", "date_to": "2024-01-02"},
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn("not approved", response.json()["detail"].lower())
 
     def test_health_and_campaign_lead_source_crud_are_database_backed(self):
         self.assertEqual(api_request("GET", "/health").status_code, 200)
+        default_sources = api_request("GET", "/api/v1/sources").json()
+        self.assertTrue(any(source["name"] == "National Treasury eTender Transparency Portal" for source in default_sources))
         created = api_request("POST", "/api/v1/campaigns", json={"name": "Test leads", "objective": "Integration", "lead_type": "business"})
         self.assertEqual(created.status_code, 201, created.text)
         campaign = created.json()

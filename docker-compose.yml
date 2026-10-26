@@ -19,6 +19,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://arletion:change-this-local-password@db:5432/arletion}
       ARLETION_CORS_ORIGINS: ${ARLETION_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      ARLETION_REQUIRE_API_KEY: ${ARLETION_REQUIRE_API_KEY:-true}
+      ARLETION_API_KEY: ${ARLETION_API_KEY:-change-this-local-api-key}
       ARLETION_DEMO_MODE: "false"
     ports: ["8000:8000"]
     depends_on:
@@ -34,7 +36,10 @@ services:
       args:
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://127.0.0.1:8000}
     environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      ARLETION_API_BASE_URL: http://api:8000
+      ARLETION_API_KEY: ${ARLETION_API_KEY:-change-this-local-api-key}
+      ARLETION_BASIC_AUTH_USER: ${ARLETION_BASIC_AUTH_USER:-local-admin}
+      ARLETION_BASIC_AUTH_PASSWORD: ${ARLETION_BASIC_AUTH_PASSWORD:-change-this-local-basic-auth-password}
     ports: ["3000:3000"]
     depends_on:
       api: { condition: service_healthy }
