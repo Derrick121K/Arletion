@@ -194,11 +194,12 @@ def import_opportunities(session: Session, records: Iterable[dict[str, Any]]) ->
             if old_release and item["source_updated_at"] and item["source_updated_at"] < old_release:
                 stale += 1
                 continue
-            if latest_record and latest_record.external_id == item["source_record_id"] and latest_record.payload_hash == hashlib.sha256(json.dumps(item["raw_payload"], sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest():
-                unchanged += 1
-                continue
-            updated += 1
         opportunity_values = {key: value for key, value in item.items() if key not in {"raw_payload", "source_updated_at", "release_id", "source_record_id"}}
+            if latest_record and latest_record.external_id == item["source_record_id"] and latest_record.payload_hash == hashlib.sha256(json.dumps(item["raw_payload"], sort_keys=True, default=str, ensure_ascii=False).encode()).hexdigest():
+                if all(getattr(existing, key) == value for key, value in opportunity_values.items()):
+                    unchanged += 1
+                    continue
+            updated += 1
         if existing is not None:
             opportunity_values["id"] = existing.id
         statement = insert(Opportunity).values(source_id=source.id, **opportunity_values)
