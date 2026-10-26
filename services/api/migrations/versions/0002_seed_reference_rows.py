@@ -24,7 +24,8 @@ def upgrade() -> None:
     """)
     op.execute("""
         INSERT INTO source_registry (
-            id, name, base_url, source_type, licence_reference, permitted_use, enabled
+            id, name, base_url, source_type, licence_reference, permitted_use, enabled,
+            rate_limit_config, retention_config
         )
         VALUES (
             '00000000-0000-0000-0000-000000000002',
@@ -33,7 +34,9 @@ def upgrade() -> None:
             'procurement_ocds',
             'API OpenAPI declares ODC PDDL 1.0; bulk-download terms differ; verify document-specific terms',
             'review_required',
-            FALSE
+            FALSE,
+            '{}'::jsonb,
+            '{}'::jsonb
         )
         ON CONFLICT DO NOTHING
     """)
