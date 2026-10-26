@@ -38,7 +38,7 @@ services:
     buildCommand: npm install --package-lock-only --no-audit --no-fund && npm ci && npm run lint && npm run typecheck && npm test && npm run build
     startCommand: npm run start
     healthCheckPath: /healthz
-    autoDeployTrigger: checksPass
+    autoDeployTrigger: off
     envVars:
       - key: NODE_VERSION
         value: 22.15.0
