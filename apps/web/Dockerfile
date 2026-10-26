@@ -1,7 +1,7 @@
 FROM node:20-alpine AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm install --package-lock-only --no-audit --no-fund && npm ci
 
 FROM node:20-alpine AS builder
 WORKDIR /app
