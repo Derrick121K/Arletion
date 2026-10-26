@@ -74,6 +74,8 @@ test("production dashboard uses the protected same-origin API proxy", async () =
 test("opportunities page offers a date-bounded official import", async () => {
   const page = await read("app/page.tsx");
   assert.match(page, /Import official eTender page/);
+  assert.match(page, /Approve source first/);
+  assert.match(page, /approveSource/);
   assert.match(page, /date_from:dateFrom/);
   assert.match(page, /date_to:dateTo/);
   assert.ok(page.includes("setReloadKey(value=>value+1)"));
