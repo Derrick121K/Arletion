@@ -1,7 +1,7 @@
 # Arletion v0.1 — Lead Intelligence
 Free-first, API-first lead discovery for South African business prospects and procurement opportunities.
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Derrick121K/Arletion/tree/release/deploy-hardening)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Derrick121K/Arletion)
 
 **Private preview only:** this one-click setup uses Render Free Postgres, which expires after 30 days and has no backups. Do not store client data or consumer enquiries in this preview.
 
