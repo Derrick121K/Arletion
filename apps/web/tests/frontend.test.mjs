@@ -60,12 +60,12 @@ test("production dashboard uses the protected same-origin API proxy", async () =
   const apiProxy = await read("app/api/backend/[...path]/route.ts");
   const render = await readFile(resolve(monorepoRoot, "render.yaml"), "utf8");
 
-  assert.match(page, /const API="\\/api\\/backend"/);
+  assert.ok(page.includes('const API="/api/backend"'));
   assert.doesNotMatch(page, /NEXT_PUBLIC_API_BASE_URL/);
   assert.match(proxy, /ARLETION_BASIC_AUTH_USER/);
   assert.match(proxy, /ARLETION_BASIC_AUTH_PASSWORD/);
   assert.match(apiProxy, /ARLETION_API_KEY/);
-  assert.match(apiProxy, /api\\/v1/);
+  assert.ok(apiProxy.includes('path[0] !== "api"') && apiProxy.includes('path[1] !== "v1"'));
   assert.match(render, /ARLETION_REQUIRE_API_KEY/);
   assert.match(render, /property: hostport/);
   assert.match(render, /sync: false/);
@@ -76,7 +76,7 @@ test("opportunities page offers a date-bounded official import", async () => {
   assert.match(page, /Import official eTender page/);
   assert.match(page, /date_from:dateFrom/);
   assert.match(page, /date_to:dateTo/);
-  assert.match(page, /setReloadKey\\(value=>value\\+1\\)/);
+  assert.ok(page.includes("setReloadKey(value=>value+1)"));
 });
 
 test("dashboard data loader reads all API summaries", async () => {
