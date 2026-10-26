@@ -67,7 +67,7 @@ test("production dashboard uses the protected same-origin API proxy", async () =
   assert.match(apiProxy, /ARLETION_API_KEY/);
   assert.ok(apiProxy.includes('path[0] !== "api"') && apiProxy.includes('path[1] !== "v1"'));
   assert.match(render, /ARLETION_REQUIRE_API_KEY/);
-  assert.match(render, /property: hostport/);
+  assert.match(render, /value: https:\/\/arletion-api\.onrender\.com/);
   assert.match(render, /sync: false/);
 });
 
