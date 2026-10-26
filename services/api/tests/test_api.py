@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from app.database import engine_for_url
+from app.database import engine_for_url, normalize_database_url
 from app.main import app
 from app.models import Base
 from app.procurement import normalize_record, parse_import
@@ -18,6 +18,34 @@ def api_request(method: str, path: str, **kwargs):
 
 
 class ApiUnitTests(unittest.TestCase):
+    def test_hosted_postgres_urls_select_psycopg3(self):
+        self.assertEqual(
+            normalize_database_url("postgres://user:pass@db.example:5432/app"),
+            "postgresql+psycopg://user:pass@db.example:5432/app",
+        )
+        self.assertEqual(
+            normalize_database_url("postgresql://user:pass@db.example:5432/app"),
+            "postgresql+psycopg://user:pass@db.example:5432/app",
+        )
+        self.assertEqual(
+            normalize_database_url("postgresql+psycopg://user:pass@db.example:5432/app"),
+            "postgresql+psycopg://user:pass@db.example:5432/app",
+        )
+
+    def test_api_key_protects_data_routes_when_enabled(self):
+        with patch.dict(os.environ, {
+            "ARLETION_REQUIRE_API_KEY": "true",
+            "ARLETION_API_KEY": "test-secret-key",
+            "DATABASE_URL": "",
+            "ARLETION_TEST_DATABASE_URL": "",
+        }):
+            denied = api_request("GET", "/api/v1/campaigns")
+            self.assertEqual(denied.status_code, 401)
+            allowed = api_request("GET", "/api/v1/campaigns", headers={"Authorization": "Bearer test-secret-key"})
+            # Correct authentication reaches the database dependency, which is intentionally absent in this unit test.
+            self.assertEqual(allowed.status_code, 503)
+            self.assertIn("DATABASE_URL", allowed.text)
+
     def test_liveness_does_not_claim_database_readiness(self):
         with patch.dict(os.environ, {"DATABASE_URL": "", "ARLETION_TEST_DATABASE_URL": ""}):
             live = api_request("GET", "/live")
