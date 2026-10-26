@@ -240,6 +240,14 @@ def import_opportunity_file(payload: dict[str, Any], session: Session = Depends(
 
 @app.post("/api/v1/opportunities/import/official")
 def import_official_opportunities(payload: OfficialImportWrite, session: Session = Depends(get_session)):
+    source = session.scalar(select(SourceRegistry).where(
+        SourceRegistry.name == "National Treasury eTender Transparency Portal"
+    ))
+    if source is None or not source.enabled or source.permitted_use != "approved":
+        raise HTTPException(
+            status_code=409,
+            detail="The official eTender connector is not approved. Review its documented access and reuse terms in Source Registry, then explicitly approve and enable it before importing.",
+        )
     import json, urllib.error, urllib.parse, urllib.request
     params={"PageNumber":payload.page_number,"PageSize":payload.page_size}
     params["dateFrom"]=payload.date_from.isoformat()
