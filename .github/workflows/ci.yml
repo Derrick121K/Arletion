@@ -27,7 +27,7 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
       - name: Install frontend dependencies
-        run: npm ci --prefix apps/web
+        run: npm install --package-lock-only --prefix apps/web --no-audit --no-fund && npm ci --prefix apps/web
       - name: Lint
         run: npm --prefix apps/web run lint
       - name: Type check
