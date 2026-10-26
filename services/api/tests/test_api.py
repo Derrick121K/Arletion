@@ -135,6 +135,27 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             # Keep migration-seeded reference rows; clear tenant-owned/test data.
             connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, leads, opportunities, source_records, campaigns, organizations RESTART IDENTITY CASCADE"))
             connection.execute(text("DELETE FROM source_registry WHERE id <> '00000000-0000-0000-0000-000000000002'"))
+            connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL WHERE id = '00000000-0000-0000-0000-000000000002'"))
+
+    def test_source_can_be_explicitly_approved_after_manual_review(self):
+        response = api_request(
+            "POST",
+            "/api/v1/sources",
+            json={
+                "name": "National Treasury eTender Transparency Portal",
+                "url": "https://data.etenders.gov.za/",
+                "category": "procurement_ocds",
+                "status": "enabled",
+                "note": "Reviewed source access and reuse terms for this test.",
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["status"], "enabled")
+        persisted = {
+            source["name"]: source
+            for source in api_request("GET", "/api/v1/sources").json()
+        }["National Treasury eTender Transparency Portal"]
+        self.assertEqual(persisted["status"], "enabled")
 
     def test_official_import_is_blocked_until_source_is_approved(self):
         response = api_request(
