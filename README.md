@@ -17,7 +17,8 @@ The Arletion project root is this directory. Its root npm scripts delegate only 
 
 ```powershell
 Set-Location "C:\Users\Kapa\Music\Arletion\arletion-v0.1"
-npm ci --prefix apps/web
+npm install --package-lock-only --prefix apps/web --no-audit --no-fund
+ npm ci --prefix apps/web
 npm run lint
 npm run typecheck
 npm test
