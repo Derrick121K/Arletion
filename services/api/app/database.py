@@ -16,13 +16,23 @@ DEFAULT_TENANT_ID = UUID("00000000-0000-0000-0000-000000000001")
 ETENDERS_SOURCE_ID = UUID("00000000-0000-0000-0000-000000000002")
 
 
+def normalize_database_url(database_url: str) -> str:
+    """Use the installed psycopg 3 driver for common hosted PostgreSQL URLs."""
+    if database_url.startswith("postgres://"):
+        return "postgresql+psycopg://" + database_url[len("postgres://"):]
+    if database_url.startswith("postgresql://"):
+        return "postgresql+psycopg://" + database_url[len("postgresql://"):]
+    return database_url
+
+
 @lru_cache(maxsize=4)
 def engine_for_url(database_url: str) -> Engine:
-    return create_engine(database_url, pool_pre_ping=True, pool_size=5, max_overflow=5, connect_args={"connect_timeout": 3})
+    return create_engine(normalize_database_url(database_url), pool_pre_ping=True, pool_size=5, max_overflow=5, connect_args={"connect_timeout": 3})
 
 
 def configured_database_url() -> str | None:
-    return os.getenv("DATABASE_URL") or os.getenv("ARLETION_TEST_DATABASE_URL")
+    value = os.getenv("DATABASE_URL") or os.getenv("ARLETION_TEST_DATABASE_URL")
+    return normalize_database_url(value) if value else None
 
 
 def get_session() -> Generator[Session, None, None]:
