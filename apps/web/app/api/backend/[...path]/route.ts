@@ -22,7 +22,8 @@ async function forward(request: NextRequest, context: RouteContext) {
     return NextResponse.json({ detail: "Arletion server-side API credential is not configured." }, { status: 503 });
   }
 
-  const baseWithSlash = base.endsWith("/") ? base : `${base}/`;
+  const withScheme = /^https?:\/\//i.test(base) ? base : `http://${base}`;
+  const baseWithSlash = withScheme.endsWith("/") ? withScheme : `${withScheme}/`;
   const target = new URL(`${path.join("/")}${request.nextUrl.search}`, baseWithSlash);
   const headers = new Headers({ Accept: "application/json" });
   const contentType = request.headers.get("content-type");
