@@ -22,6 +22,10 @@ npm run lint
 npm run typecheck
 npm test
 npm run build
+$env:ARLETION_API_BASE_URL = "http://127.0.0.1:8000"
+$env:ARLETION_API_KEY = "local-demo-key"
+$env:ARLETION_BASIC_AUTH_USER = "local-admin"
+$env:ARLETION_BASIC_AUTH_PASSWORD = "replace-with-a-strong-local-password"
 npm run start:windows -- -Port 3000
 ```
 
@@ -50,7 +54,11 @@ Set-Location "C:\Users\Kapa\Music\Arletion\arletion-v0.1"
 if (-not (Test-Path .venv)) { py -m venv .venv }
 .\.venv\Scripts\python.exe -m pip install -r services\api\requirements.txt
 $env:DATABASE_URL = "postgresql+psycopg://arletion:YOUR_LOCAL_PASSWORD@127.0.0.1:5432/arletion"
+$env:ARLETION_API_KEY = "local-demo-key"
+$env:ARLETION_REQUIRE_API_KEY = "true"
+$env:ARLETION_CORS_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
 Push-Location services\api
+..\..\.venv\Scripts\alembic.exe upgrade head
 ..\..\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 Pop-Location
 ```
