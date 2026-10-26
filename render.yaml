@@ -35,7 +35,7 @@ services:
     region: frankfurt
     plan: free
     rootDir: apps/web
-    buildCommand: npm ci && npm run lint && npm run typecheck && npm test && npm run build
+    buildCommand: npm install --package-lock-only --no-audit --no-fund && npm ci && npm run lint && npm run typecheck && npm test && npm run build
     startCommand: npm run start
     healthCheckPath: /healthz
     autoDeployTrigger: checksPass
