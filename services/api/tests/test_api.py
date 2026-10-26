@@ -81,9 +81,9 @@ class ApiUnitTests(unittest.TestCase):
             "Origin": "http://localhost:3000", "Access-Control-Request-Method": "GET"
         })
         self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:3000")
-        denied = api_request("GET", "/health", headers={"Origin": "https://unapproved.example"})
+        denied = api_request("GET", "/live", headers={"Origin": "https://unapproved.example"})
         self.assertNotIn("access-control-allow-origin", denied.headers)
-        self.assertEqual(denied.status_code, 503)
+        self.assertEqual(denied.status_code, 200)
 
     def test_documented_json_and_flat_csv_import_formats(self):
         package = {"releases": [{"ocid": "ocds-9t57fa-1", "id": "release-1", "date": "2030-01-01T10:00:00Z", "tender": {"title": "Road maintenance", "status": "active", "tenderPeriod": {"startDate": "2030-01-01", "endDate": "2030-02-01"}}, "buyer": {"name": "Public works"}}]}
