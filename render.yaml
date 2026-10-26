@@ -14,7 +14,7 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
-    autoDeployTrigger: checksPass
+    autoDeployTrigger: off
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.9
@@ -42,11 +42,10 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 22.15.0
+      # Free web services cannot receive private-network traffic. Use the API's
+      # public HTTPS endpoint; the server-side proxy attaches the bearer key.
       - key: ARLETION_API_BASE_URL
-        fromService:
-          type: web
-          name: arletion-api
-          property: hostport
+        value: https://arletion-api.onrender.com
       - key: ARLETION_API_KEY
         fromService:
           type: web
