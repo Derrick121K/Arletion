@@ -106,7 +106,6 @@ Maroon `#5B0F1A`, red `#D62828`, gold `#D4AF37`, white `#FFFFFF`, black `#0B0B0B
 Tagline: **Find • Qualify • Unlock • Grow**.
 #
 
-
 ## Protected Render preview deployment
 
 A private-preview Blueprint is provided in render.yaml. It creates the web frontend, FastAPI service and PostgreSQL database, generates a server-side API key, protects the dashboard with HTTP Basic authentication, and requires the API key for all /api/v1/* requests. The web server proxies dashboard API requests server-side; no API key is exposed to browser JavaScript.
