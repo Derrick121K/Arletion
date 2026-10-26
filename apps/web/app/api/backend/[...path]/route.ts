@@ -36,7 +36,7 @@ async function forward(request: NextRequest, context: RouteContext) {
       headers,
       body: request.method === "GET" || request.method === "HEAD" ? undefined : await request.text(),
       cache: "no-store",
-      signal: AbortSignal.timeout(60_000),
+      signal: AbortSignal.timeout(90_000),
     });
     const responseHeaders = new Headers({
       "Cache-Control": "no-store",
