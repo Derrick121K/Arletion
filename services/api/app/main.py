@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 from .database import DEFAULT_TENANT_ID, ETENDERS_SOURCE_ID, db_health, get_session
@@ -822,9 +823,13 @@ async def receive_tally_webhook(
         raise HTTPException(status_code=400, detail="Tally webhook payload must be a JSON object.")
     canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     expected = base64.b64encode(
+        hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).digest()
+    ).decode("ascii")
+    canonical_expected = base64.b64encode(
         hmac.new(secret.encode("utf-8"), canonical, hashlib.sha256).digest()
     ).decode("ascii")
-    if not hmac.compare_digest(expected, tally_signature.strip()):
+    if not (hmac.compare_digest(expected, tally_signature.strip())
+            or hmac.compare_digest(canonical_expected, tally_signature.strip())):
         raise HTTPException(status_code=401, detail="Tally webhook signature is invalid.")
     if payload.get("eventType") != "FORM_RESPONSE":
         raise HTTPException(status_code=422, detail="Only Tally FORM_RESPONSE events are accepted.")
@@ -862,14 +867,8 @@ async def receive_tally_webhook(
     if campaign is None or campaign.criteria.get("tally_intake") is not True:
         raise HTTPException(status_code=409, detail="The configured active consumer campaign has not enabled Tally intake.")
     enquiry_payload, category = _tally_enquiry(fields)
-    created = True
-    try:
-        create_consumer_enquiry(ConsumerEnquiryWrite(campaign_id=campaign.id, **enquiry_payload), session)
-    except HTTPException as error:
-        if error.status_code != 409:
-            raise
-        created = False
-    session.add(SourceRecord(
+    consumer_payload = ConsumerEnquiryWrite(campaign_id=campaign.id, **enquiry_payload)
+    receipt = SourceRecord(
         source_id=source.id,
         external_id=event_id,
         record_type="tally_webhook_event",
@@ -881,10 +880,31 @@ async def receive_tally_webhook(
             "response_id": str(data.get("responseId") or data.get("submissionId") or "")[:120],
             "category": category,
             "marketing_consent": bool(enquiry_payload["marketing_consent"]),
-            "created": created,
         },
-    ))
-    session.commit()
+    )
+    session.add(receipt)
+    try:
+        session.flush()
+    except IntegrityError:
+        session.rollback()
+        duplicate = session.scalar(select(SourceRecord.id).where(
+            SourceRecord.source_id == source.id,
+            SourceRecord.external_id == event_id,
+            SourceRecord.record_type == "tally_webhook_event",
+        ))
+        if duplicate:
+            return {"accepted": True, "duplicate_event": True, "created": False}
+        raise
+    created = True
+    try:
+        create_consumer_enquiry(consumer_payload, session)
+    except HTTPException as error:
+        if error.status_code != 409:
+            session.rollback()
+            raise
+        created = False
+        receipt.raw_payload = {**(receipt.raw_payload or {}), "created": False}
+        session.commit()
     return {"accepted": True, "duplicate_event": False, "created": created, "category": category}
 
 
@@ -894,7 +914,11 @@ def consumer_intake_status(session: Session = Depends(get_session)):
         CampaignRow.lead_type == "consumer_enquiry",
         CampaignRow.status == "active",
     )).all()
-    tally_campaign = session.get(CampaignRow, UUID(os.getenv("ARLETION_TALLY_CAMPAIGN_ID"))) if re.fullmatch(r"[0-9a-fA-F-]{36}", os.getenv("ARLETION_TALLY_CAMPAIGN_ID", "")) else None
+    try:
+        tally_campaign_id = UUID(os.getenv("ARLETION_TALLY_CAMPAIGN_ID", ""))
+    except ValueError:
+        tally_campaign_id = None
+    tally_campaign = session.get(CampaignRow, tally_campaign_id) if tally_campaign_id else None
     tally_source = session.scalar(select(SourceRegistry).where(SourceRegistry.name == "Tally Voluntary Consumer Enquiry Webhook"))
     tally_webhook_ready = (
         os.getenv("ARLETION_TALLY_WEBHOOK_ENABLED", "false").lower() == "true"
