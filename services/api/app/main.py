@@ -681,7 +681,17 @@ def import_openstreetmap_businesses(payload: OpenStreetMapImportWrite, session: 
 
 
 @app.get("/api/v1/consumer-enquiries/status")
-def consumer_intake_status():
+def consumer_intake_status(session: Session = Depends(get_session)):
+    public_campaigns = session.scalars(select(CampaignRow).where(
+        CampaignRow.tenant_id == DEFAULT_TENANT_ID,
+        CampaignRow.lead_type == "consumer_enquiry",
+        CampaignRow.status == "active",
+    )).all()
+    public_form = (
+        os.getenv("ARLETION_PUBLIC_CONSUMER_FORM_ENABLED", "false").lower() == "true"
+        and consumer_storage_ready()
+        and any(row.criteria.get("public_intake") is True for row in public_campaigns)
+    )
     return {
         "enabled": consumer_storage_ready(),
         "storage_approved": os.getenv("ARLETION_CONSUMER_STORAGE_APPROVED", "false").lower() == "true",
@@ -689,15 +699,15 @@ def consumer_intake_status():
         "encryption_configured": bool(os.getenv("ARLETION_PII_ENCRYPTION_KEY")),
         "deduplication_key_configured": len(os.getenv("ARLETION_CONTACT_HASH_KEY", "")) >= 32,
         "separate_contact_access_configured": bool(os.getenv("ARLETION_CONSUMER_ACCESS_KEY")),
-        "public_form": False,
-        "note": "Contact capture remains disabled until all storage and security controls are explicitly enabled.",
+        "public_form": public_form,
+        "note": "Public intake requires durable storage, encryption, separate access controls, an active public campaign and the explicit public-form switch.",
     }
 
 
 @app.get("/api/v1/consumer-enquiries", response_model=ConsumerEnquiryPage)
 def get_consumer_enquiries(
     status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
-    category: Literal["debt_counselling", "debt_review_information", "budget_guidance", "general"] | None = None,
+    category: Literal["debt_counselling", "debt_review_information", "considering_debt_review", "already_under_review", "application_pending", "debt_review_assistance", "completed_debt_review", "budget_guidance", "general"] | None = None,
     province: str | None = Query(default=None, max_length=100),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
@@ -720,6 +730,8 @@ def get_consumer_enquiries(
 def create_public_consumer_enquiry(payload: PublicConsumerEnquiryWrite, session: Session = Depends(get_session)):
     if payload.website.strip():
         return JSONResponse({"accepted": True}, status_code=202)
+    if os.getenv("ARLETION_PUBLIC_CONSUMER_FORM_ENABLED", "false").lower() != "true":
+        raise HTTPException(status_code=503, detail="The public debt-review enquiry form is not enabled.")
     _consumer_ready()
     campaigns = session.scalars(select(CampaignRow).where(
         CampaignRow.tenant_id == DEFAULT_TENANT_ID,
