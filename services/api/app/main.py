@@ -719,7 +719,7 @@ def get_consumer_enquiries(
 @app.post("/api/v1/public/consumer-enquiries", response_model=ConsumerEnquiryItem, status_code=201)
 def create_public_consumer_enquiry(payload: PublicConsumerEnquiryWrite, session: Session = Depends(get_session)):
     if payload.website.strip():
-        return {"id": "accepted", "campaign_id": "accepted", "contact_protected": True}
+        return JSONResponse({"accepted": True}, status_code=202)
     _consumer_ready()
     campaigns = session.scalars(select(CampaignRow).where(
         CampaignRow.tenant_id == DEFAULT_TENANT_ID,
