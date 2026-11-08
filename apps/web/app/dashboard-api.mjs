@@ -1,4 +1,4 @@
-const endpoints = ["campaigns", "leads", "sources", "summary", "opportunities"];
+const endpoints = ["campaigns", "sources", "summary", "opportunities"];
 
 /** @param {string} apiBaseUrl @param {typeof fetch} fetcher @param {number} timeoutMs */
 export async function loadDashboardData(apiBaseUrl, fetcher = fetch, timeoutMs = 90000) {
@@ -29,9 +29,24 @@ export async function loadDashboardData(apiBaseUrl, fetcher = fetch, timeoutMs =
 
   return {
     campaigns: values[0],
-    leads: values[1],
-    sources: values[2],
-    summary: values[3],
-    opportunities: values[4].items,
+    leads: [],
+    sources: values[1],
+    summary: values[2],
+    opportunities: values[3].items,
   };
+}
+
+/** @param {string} apiBaseUrl @param {{q?:string,lead_type?:string,category?:string,status?:string,province?:string,page?:number,page_size?:number}} filters @param {typeof fetch} fetcher */
+export async function loadLeadPage(apiBaseUrl, filters = {}, fetcher = fetch) {
+  const params = new URLSearchParams({ page: String(filters.page ?? 1), page_size: String(filters.page_size ?? 25) });
+  for (const key of ["q", "lead_type", "category", "status", "province"]) {
+    const value = filters[key];
+    if (value) params.set(key, value);
+  }
+  const response = await fetcher(`${apiBaseUrl}/api/v1/leads/search?${params.toString()}`, {
+    signal: AbortSignal.timeout(30000),
+    cache: "no-store",
+  });
+  if (!response.ok) throw new Error(`Lead search failed with HTTP ${response.status}.`);
+  return response.json();
 }

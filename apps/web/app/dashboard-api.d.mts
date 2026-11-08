@@ -12,7 +12,9 @@ export interface Lead {
   id: string;
   organization: string;
   lead_type: string;
+  category: string | null;
   location: string;
+  province: string | null;
   source: string;
   source_url: string;
   status: string;
@@ -53,6 +55,20 @@ export interface Opportunity {
   source_url: string;
   provenance: string;
 }
+
+export interface LeadPage {
+  items: Lead[];
+  categories: string[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export function loadLeadPage(
+  apiBaseUrl: string,
+  filters?: { q?: string; lead_type?: string; category?: string; status?: string; province?: string; page?: number; page_size?: number },
+  fetcher?: typeof fetch,
+): Promise<LeadPage>;
 
 export function loadDashboardData(
   apiBaseUrl: string,

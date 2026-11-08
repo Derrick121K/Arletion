@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 from datetime import date, datetime, timezone
+from urllib.parse import urlsplit
 from typing import Any, Iterable
 
 from sqlalchemy import select
@@ -91,6 +92,12 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any] | None:
     original_url = _field(record, "source_url", "sourceUrl", "url", "tender/documents/0/url")
     if not original_url:
         original_url = next((d.get("url") for d in documents if isinstance(d, dict) and d.get("url")), ETENDERS_PORTAL)
+    try:
+        parsed_url = urlsplit(str(original_url))
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname or parsed_url.username or parsed_url.password:
+            original_url = ETENDERS_PORTAL
+    except ValueError:
+        original_url = ETENDERS_PORTAL
 
     source_status = str(tender.get("status") or _field(record, "status", "tender/status", "tender.status") or "").lower()
     awards = record.get("awards") if isinstance(record.get("awards"), list) else []

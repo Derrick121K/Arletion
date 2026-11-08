@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
-import { loadDashboardData } from "../app/dashboard-api.mjs";
+import { loadDashboardData, loadLeadPage } from "../app/dashboard-api.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const monorepoRoot = resolve(webRoot, "../..");
@@ -88,7 +88,6 @@ test("dashboard data loader reads all API summaries", async () => {
     const endpoint = url.split("/").at(-1);
     const bodies = {
       campaigns: [],
-      leads: [],
       sources: [],
       summary: { campaigns: 0, leads: 0, sources: 0, qualified: 0, demo_mode: true },
       opportunities: { items: [], demo_mode: true, message: "No records" },
@@ -96,12 +95,47 @@ test("dashboard data loader reads all API summaries", async () => {
     return { ok: true, json: async () => bodies[endpoint] };
   });
 
-  assert.equal(calls.length, 5);
+  assert.equal(calls.length, 4);
   assert.deepEqual(result.campaigns, []);
   assert.deepEqual(result.leads, []);
   assert.deepEqual(result.sources, []);
   assert.equal(result.summary.demo_mode, true);
   assert.deepEqual(result.opportunities, []);
+});
+
+test("lead search sends category, type, status and pagination filters to the API", async () => {
+  let requestedUrl = "";
+  const result = await loadLeadPage("http://127.0.0.1:8000", {
+    q: "Witbank", lead_type: "business", category: "Construction",
+    status: "qualified", province: "Mpumalanga", page: 2, page_size: 10,
+  }, async (url, options) => {
+    requestedUrl = url;
+    assert.ok(options.signal instanceof AbortSignal);
+    return { ok: true, json: async () => ({
+      items: [], categories: ["Construction"], page: 2, page_size: 10, total: 0,
+    }) };
+  });
+  const parsed = new URL(requestedUrl);
+  assert.equal(parsed.pathname, "/api/v1/leads/search");
+  assert.equal(parsed.searchParams.get("category"), "Construction");
+  assert.equal(parsed.searchParams.get("lead_type"), "business");
+  assert.equal(parsed.searchParams.get("status"), "qualified");
+  assert.equal(parsed.searchParams.get("province"), "Mpumalanga");
+  assert.equal(parsed.searchParams.get("page"), "2");
+  assert.equal(result.total, 0);
+});
+
+test("lead search surfaces API failures and the UI exposes server-side category filters", async () => {
+  await assert.rejects(
+    loadLeadPage("http://127.0.0.1:8000", {}, async () => ({ ok: false, status: 502 })),
+    /Lead search failed with HTTP 502/,
+  );
+  const page = await read("app/page.tsx");
+  assert.match(page, /Industry category/);
+  assert.match(page, /loadLeadPage/);
+  assert.match(page, /Previous/);
+  assert.match(page, /Next/);
+  assert.doesNotMatch(page, /const filtered=useMemo/);
 });
 
 test("dashboard data loader reports unavailable or failing API requests", async () => {
