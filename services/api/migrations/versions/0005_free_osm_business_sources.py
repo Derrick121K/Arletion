@@ -27,7 +27,7 @@ def upgrade() -> None:
             "lead_verification_status_check", "leads",
             "verification_status IN ('unverified','source_confirmed','officially_verified','needs_review')",
         )
-    op.execute("""
+    bind.exec_driver_sql("""
         INSERT INTO source_registry (
             id, name, base_url, source_type, licence_reference, permitted_use, enabled,
             rate_limit_config, retention_config
