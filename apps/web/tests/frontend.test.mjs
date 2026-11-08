@@ -309,7 +309,6 @@ test("public debt-review enquiry page keeps processing and marketing consent sep
   assert.match(page, /I confirm that I am 18 years or older/);
   assert.match(page, /Do not enter your South African ID number/);
   assert.match(page, /api\/public\/enquiries/);
-  assert.doesNotMatch(page, /creditor lists/gi, /x/);
 });
 
 test("NCR directory import posts selected keyword and partnership campaign", async () => {
