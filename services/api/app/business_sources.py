@@ -144,7 +144,7 @@ def normalize_osm_businesses(payload: dict, category: str, locality: str, provin
     return results
 
 
-def fetch_osm_businesses(category: str, latitude: float, longitude: float, radius_m: int, limit: int = 100) -> list[dict]:
+def fetch_osm_businesses(category: str, latitude: float, longitude: float, radius_m: int, locality: str, province: str, limit: int = 100) -> list[dict]:
     query = overpass_query(category, latitude, longitude, radius_m, limit)
     try:
         with httpx.Client(
@@ -159,4 +159,4 @@ def fetch_osm_businesses(category: str, latitude: float, longitude: float, radiu
             payload = response.json()
     except (httpx.HTTPError, ValueError) as error:
         raise RuntimeError("OpenStreetMap could not complete this search. Retry later or reduce the search radius.") from error
-    return normalize_osm_businesses(payload, category, "eMalahleni", "Mpumalanga")
+    return normalize_osm_businesses(payload, category, locality, province)
