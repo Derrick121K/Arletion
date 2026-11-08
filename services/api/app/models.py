@@ -91,6 +91,7 @@ class Organization(Base):
     locality: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    __table_args__ = (Index("organizations_business_category_idx", "business_category"), Index("organizations_location_idx", "province", "municipality", "locality"))
 
 
 class Lead(Base):
@@ -113,6 +114,7 @@ class Lead(Base):
         CheckConstraint("score BETWEEN 0 AND 100", name="lead_score_check"),
         UniqueConstraint("tenant_id", "campaign_id", "organization_id", name="leads_tenant_campaign_organization_uq"),
         Index("leads_tenant_status_score_idx", "tenant_id", "status", "score"),
+        Index("leads_tenant_type_status_created_idx", "tenant_id", "lead_type", "status", "created_at"),
     )
 
 
