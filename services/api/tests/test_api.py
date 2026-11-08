@@ -686,7 +686,6 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
                     {"label": "Phone number", "type": "INPUT_PHONE_NUMBER", "value": "+27821234567"},
                     {"label": "Email address", "type": "INPUT_EMAIL", "value": "tally-test@example.com"},
                     {"label": "Province", "type": "DROPDOWN", "value": ["province-option"], "options": [{"id": "province-option", "text": "Mpumalanga"}]},
-                    {"label": "Town / locality", "type": "INPUT_TEXT", "value": "eMalahleni"},
                     {"label": "Preferred contact channel", "type": "MULTIPLE_CHOICE", "value": ["channel-option"], "options": [{"id": "channel-option", "text": "WhatsApp"}]},
                     {"label": "Debt-review situation", "type": "MULTIPLE_CHOICE", "value": ["situation-option"], "options": [{"id": "situation-option", "text": "Already under debt review"}]},
                     {"label": "I confirm I am 18 years or older", "type": "CHECKBOXES", "value": ["I confirm I am 18 years or older"]},
