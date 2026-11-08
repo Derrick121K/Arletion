@@ -118,6 +118,36 @@ class Lead(Base):
     )
 
 
+class ConsumerEnquiry(Base):
+    __tablename__ = "consumer_enquiries"
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False)
+    campaign_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("campaigns.id", ondelete="CASCADE"), nullable=False)
+    contact_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    name_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    phone_ciphertext: Mapped[str | None] = mapped_column(Text)
+    email_ciphertext: Mapped[str | None] = mapped_column(Text)
+    province: Mapped[str | None] = mapped_column(Text)
+    locality: Mapped[str | None] = mapped_column(Text)
+    preferred_channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[str] = mapped_column(String(120), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="new")
+    processing_consent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    marketing_consent: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    marketing_consent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notice_version: Mapped[str] = mapped_column(String(40), nullable=False)
+    retention_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "campaign_id", "contact_fingerprint", name="consumer_enquiry_campaign_contact_uq"),
+        CheckConstraint("preferred_channel IN ('phone','email','whatsapp')", name="consumer_enquiry_channel_check"),
+        CheckConstraint("status IN ('new','contacted','qualified','converted','disqualified','suppressed')", name="consumer_enquiry_status_check"),
+        Index("consumer_enquiries_tenant_status_created_idx", "tenant_id", "status", "created_at"),
+        Index("consumer_enquiries_retention_idx", "retention_expires_at"),
+    )
+
+
 class Opportunity(Base):
     __tablename__ = "opportunities"
     id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
