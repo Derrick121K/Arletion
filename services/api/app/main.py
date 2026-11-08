@@ -17,6 +17,7 @@ from .models import AuditEvent, Campaign as CampaignRow, ConsentRecord, Consumer
 from .privacy import consumer_storage_ready, contact_fingerprint, decrypt_contact, encrypt_contact, valid_consumer_access
 from .procurement import extract_awarded_business_suppliers, import_opportunities, parse_import
 from .business_sources import OSM_ATTRIBUTION, OSM_SOURCE, fetch_osm_businesses
+from .ncr_sources import fetch_registered_counsellors
 
 app = FastAPI(title="Arletion API", version="0.2.0", description="PostgreSQL-backed Arletion workspace and official OCDS import.")
 cors_origins = [origin.strip().rstrip("/") for origin in os.getenv(
@@ -80,7 +81,7 @@ class ConsumerEnquiryWrite(BaseModel):
     province: str | None = Field(default=None, max_length=100)
     locality: str | None = Field(default=None, max_length=120)
     preferred_channel: Literal["phone", "email", "whatsapp"]
-    category: Literal["debt_counselling", "debt_review_information", "budget_guidance", "general"] = "general"
+    category: Literal["debt_counselling", "debt_review_information", "considering_debt_review", "already_under_review", "application_pending", "debt_review_assistance", "completed_debt_review", "budget_guidance", "general"] = "general"
     source: str = Field(default="website_form", min_length=2, max_length=120)
     processing_consent: bool
     marketing_consent: bool = False
@@ -102,6 +103,39 @@ class ConsumerEnquiryWrite(BaseModel):
         if not self.processing_consent:
             raise ValueError("Consent to process this enquiry is required.")
         return self
+
+class PublicConsumerEnquiryWrite(BaseModel):
+    full_name: str = Field(min_length=2, max_length=160)
+    phone: str | None = Field(default=None, max_length=32)
+    email: str | None = Field(default=None, max_length=254)
+    province: str | None = Field(default=None, max_length=100)
+    locality: str | None = Field(default=None, max_length=120)
+    preferred_channel: Literal["phone", "email", "whatsapp"]
+    category: Literal["debt_counselling", "debt_review_information", "considering_debt_review", "already_under_review", "application_pending", "debt_review_assistance", "completed_debt_review", "budget_guidance", "general"]
+    processing_consent: bool
+    marketing_consent: bool = False
+    age_confirmed: bool
+    website: str = Field(default="", max_length=200)
+
+    @model_validator(mode="after")
+    def validate_public_enquiry(self):
+        self.full_name = self.full_name.strip()
+        if not self.age_confirmed:
+            raise ValueError("You must confirm that you are 18 or older.")
+        if not self.phone and not self.email:
+            raise ValueError("Provide a phone number or email address.")
+        if self.phone and not re.fullmatch(r"[+0-9() .-]{7,32}", self.phone.strip()):
+            raise ValueError("Provide a valid phone number.")
+        if self.email and not re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", self.email.strip()):
+            raise ValueError("Provide a valid email address.")
+        if self.preferred_channel == "email" and not self.email:
+            raise ValueError("An email address is required for the selected contact channel.")
+        if self.preferred_channel in {"phone", "whatsapp"} and not self.phone:
+            raise ValueError("A phone number is required for the selected contact channel.")
+        if not self.processing_consent:
+            raise ValueError("Consent to process this enquiry is required.")
+        return self
+
 
 class ConsumerEnquiryItem(BaseModel):
     id: str
@@ -189,6 +223,13 @@ class OpenStreetMapImportWrite(BaseModel):
 class EtenderAwardSupplierImportWrite(BaseModel):
     campaign_id: UUID
     max_releases: int = Field(default=500, ge=1, le=2000)
+
+
+class NCRDebtCounsellorImportWrite(BaseModel):
+    campaign_id: UUID
+    keyword: str = Field(default="", max_length=100)
+    page: int = Field(default=1, ge=1, le=200)
+    limit: int = Field(default=100, ge=1, le=100)
 
 
 class LeadVerificationWrite(BaseModel):
@@ -675,6 +716,29 @@ def get_consumer_enquiries(
     return ConsumerEnquiryPage(items=[_consumer_item(row) for row in rows], page=page, page_size=page_size, total=total)
 
 
+@app.post("/api/v1/public/consumer-enquiries", response_model=ConsumerEnquiryItem, status_code=201)
+def create_public_consumer_enquiry(payload: PublicConsumerEnquiryWrite, session: Session = Depends(get_session)):
+    if payload.website.strip():
+        return {"id": "accepted", "campaign_id": "accepted", "contact_protected": True}
+    _consumer_ready()
+    campaigns = session.scalars(select(CampaignRow).where(
+        CampaignRow.tenant_id == DEFAULT_TENANT_ID,
+        CampaignRow.lead_type == "consumer_enquiry",
+        CampaignRow.status == "active",
+    )).all()
+    campaign = next((row for row in campaigns if row.criteria.get("public_intake") is True), None)
+    if campaign is None:
+        raise HTTPException(status_code=503, detail="The public debt-review enquiry form is not currently accepting enquiries.")
+    enquiry = ConsumerEnquiryWrite(
+        campaign_id=campaign.id, full_name=payload.full_name, phone=payload.phone, email=payload.email,
+        province=payload.province, locality=payload.locality, preferred_channel=payload.preferred_channel,
+        category=payload.category, source="arletion_public_debt_review_form",
+        processing_consent=payload.processing_consent, marketing_consent=payload.marketing_consent,
+        notice_version="public-debt-review-v1",
+    )
+    return create_consumer_enquiry(enquiry, session)
+
+
 @app.post("/api/v1/consumer-enquiries", response_model=ConsumerEnquiryItem, status_code=201)
 def create_consumer_enquiry(payload: ConsumerEnquiryWrite, session: Session = Depends(get_session)):
     _consumer_ready()
@@ -1017,6 +1081,98 @@ def import_etender_awarded_suppliers(payload: EtenderAwardSupplierImportWrite, s
         "skipped_releases_without_company_awards": skipped,
         "verification_status": "source_confirmed",
         "verification_scope": "Named as a company-form supplier in a published OCDS award; current CSD registration, tax status and trading activity are not implied.",
+    }
+
+
+@app.post("/api/v1/leads/import/ncr-debt-counsellors")
+def import_ncr_debt_counsellors(payload: NCRDebtCounsellorImportWrite, session: Session = Depends(get_session)):
+    source = session.scalar(select(SourceRegistry).where(
+        SourceRegistry.name == "National Credit Regulator Registered Debt Counsellors"
+    ))
+    if source is None or not source.enabled or source.permitted_use != "approved":
+        raise HTTPException(status_code=409, detail="Review and approve the official NCR register in Source Registry before importing.")
+    campaign = session.scalar(select(CampaignRow).where(
+        CampaignRow.id == payload.campaign_id, CampaignRow.tenant_id == DEFAULT_TENANT_ID,
+    ))
+    if campaign is None or campaign.lead_type != "partnership":
+        raise HTTPException(status_code=409, detail="Choose a debt-counsellor partnership campaign.")
+    now = datetime.now(timezone.utc)
+    if source.last_synced_at and (now - source.last_synced_at).total_seconds() < 60:
+        raise HTTPException(status_code=429, detail="NCR directory imports are limited to one request per minute.")
+    try:
+        records = fetch_registered_counsellors(payload.keyword.strip(), payload.page, payload.limit)
+    except (OSError, TimeoutError, ValueError) as error:
+        source.last_error = f"NCR directory fetch failed: {error.__class__.__name__}"
+        session.commit()
+        raise HTTPException(status_code=502, detail="The official NCR directory could not be fetched or parsed. No leads were imported.") from error
+    inserted = updated = 0
+    for item in records:
+        key = item["registration_number"]
+        normalized = f"ncr-debt-counsellor::{key.casefold()}"
+        organization = session.scalar(select(Organization).where(
+            Organization.normalized_name == normalized, Organization.country_code == "ZA",
+        ))
+        if organization is None:
+            organization = Organization(
+                canonical_name=item["trading_name"] or item["full_name"],
+                normalized_name=normalized, country_code="ZA",
+                business_category="Debt counselling partners", locality=item["town"],
+            )
+            session.add(organization)
+            session.flush()
+        else:
+            organization.canonical_name = item["trading_name"] or item["full_name"]
+            organization.locality = item["town"]
+            organization.business_category = "Debt counselling partners"
+        lead = session.scalar(select(LeadRow).where(
+            LeadRow.tenant_id == DEFAULT_TENANT_ID, LeadRow.campaign_id == campaign.id,
+            LeadRow.organization_id == organization.id,
+        ))
+        reason = f"Listed as registered on the National Credit Regulator public debt counsellor directory. Registration: {key}. Verify current status before referring consumers or forming a partnership."
+        if lead is None:
+            lead = LeadRow(
+                tenant_id=DEFAULT_TENANT_ID, campaign_id=campaign.id, organization_id=organization.id,
+                lead_type="partnership", status="new", score=65, qualification_reason=reason,
+                verification_status="source_confirmed", verification_source="National Credit Regulator public register",
+                verified_at=now,
+            )
+            session.add(lead)
+            session.flush()
+            inserted += 1
+        else:
+            lead.last_seen_at = now
+            lead.qualification_reason = reason
+            lead.verification_status = "source_confirmed"
+            lead.verification_source = "National Credit Regulator public register"
+            lead.verified_at = now
+            updated += 1
+        evidence = session.scalar(select(SourceRecord).where(
+            SourceRecord.source_id == source.id, SourceRecord.external_id == str(lead.id),
+            SourceRecord.record_type == "lead_evidence",
+        ))
+        evidence_payload = {
+            "registration_number": key, "full_name": item["full_name"],
+            "trading_name": item["trading_name"], "registration_date": item["registration_date"],
+            "physical_address": item["physical_address"], "town": item["town"],
+            "status": "registered", "observed_at": now.isoformat(),
+        }
+        if evidence is None:
+            session.add(SourceRecord(
+                source_id=source.id, external_id=str(lead.id), record_type="lead_evidence",
+                source_url=item["source_url"], source_updated_at=now, raw_payload=evidence_payload,
+            ))
+        else:
+            evidence.source_url = item["source_url"]
+            evidence.source_updated_at = now
+            evidence.raw_payload = evidence_payload
+    source.last_synced_at = now
+    source.last_error = None
+    session.commit()
+    return {
+        "source": source.name, "keyword": payload.keyword, "page": payload.page,
+        "matched": len(records), "inserted": inserted, "updated": updated,
+        "verification_status": "source_confirmed",
+        "note": "These are professional directory listings, not consumer debt-review enquiries. No contact details were imported and no outreach was sent.",
     }
 
 
