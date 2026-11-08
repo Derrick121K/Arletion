@@ -152,3 +152,18 @@ export async function importFreeAwardedSupplierLeads(apiBaseUrl, request, fetche
   }, fetcher);
   return { batch, suppliers };
 }
+
+
+/** @param {string} apiBaseUrl @param {{campaign_id:string,keyword?:string,page?:number,limit?:number}} request @param {typeof fetch} fetcher */
+export async function importNCRDebtCounsellors(apiBaseUrl, request, fetcher = fetch) {
+  const response = await fetcher(`${apiBaseUrl}/api/v1/leads/import/ncr-debt-counsellors`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(25000),
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : `NCR directory import failed with HTTP ${response.status}.`);
+  return payload;
+}
