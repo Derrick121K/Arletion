@@ -389,6 +389,144 @@ def lead_categories(session: Session = Depends(get_session)):
     ).all()
 
 
+@app.get("/api/v1/consumer-enquiries", response_model=ConsumerEnquiryPage)
+def get_consumer_enquiries(
+    status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
+    province: str | None = Query(default=None, max_length=100),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    session: Session = Depends(get_session),
+):
+    _consumer_ready()
+    statement = select(ConsumerEnquiryRow).where(ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID)
+    if status:
+        statement = statement.where(ConsumerEnquiryRow.status == status)
+    if province:
+        statement = statement.where(func.lower(ConsumerEnquiryRow.province) == province.strip().lower())
+    total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    rows = session.scalars(statement.order_by(ConsumerEnquiryRow.created_at.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    return ConsumerEnquiryPage(items=[_consumer_item(row) for row in rows], page=page, page_size=page_size, total=total)
+
+
+@app.post("/api/v1/consumer-enquiries", response_model=ConsumerEnquiryItem, status_code=201)
+def create_consumer_enquiry(payload: ConsumerEnquiryWrite, session: Session = Depends(get_session)):
+    _consumer_ready()
+    campaign = session.scalar(select(CampaignRow).where(
+        CampaignRow.id == payload.campaign_id,
+        CampaignRow.tenant_id == DEFAULT_TENANT_ID,
+        CampaignRow.lead_type == "consumer_enquiry",
+        CampaignRow.status == "active",
+    ))
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="An active consumer-enquiry campaign is required.")
+    fingerprint = contact_fingerprint(payload.phone, payload.email)
+    duplicate = session.scalar(select(ConsumerEnquiryRow.id).where(
+        ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID,
+        ConsumerEnquiryRow.campaign_id == campaign.id,
+        ConsumerEnquiryRow.contact_fingerprint == fingerprint,
+    ))
+    if duplicate:
+        raise HTTPException(status_code=409, detail="An enquiry from this contact already exists in this campaign.")
+    try:
+        retention_days = int(os.getenv("ARLETION_CONSUMER_RETENTION_DAYS", "90"))
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Consumer retention configuration is invalid.") from None
+    if not 30 <= retention_days <= 365:
+        raise HTTPException(status_code=503, detail="ARLETION_CONSUMER_RETENTION_DAYS must be between 30 and 365.")
+    now = datetime.now(timezone.utc)
+    try:
+        row = ConsumerEnquiryRow(
+            tenant_id=DEFAULT_TENANT_ID, campaign_id=campaign.id, contact_fingerprint=fingerprint,
+            name_ciphertext=encrypt_contact(payload.full_name.strip()),
+            phone_ciphertext=encrypt_contact(payload.phone.strip()) if payload.phone else None,
+            email_ciphertext=encrypt_contact(payload.email.strip().lower()) if payload.email else None,
+            province=payload.province.strip() if payload.province else None,
+            locality=payload.locality.strip() if payload.locality else None,
+            preferred_channel=payload.preferred_channel, source=payload.source.strip(),
+            processing_consent_at=now, marketing_consent=payload.marketing_consent,
+            marketing_consent_at=now if payload.marketing_consent else None,
+            notice_version=payload.notice_version.strip(),
+            retention_expires_at=now + timedelta(days=retention_days),
+        )
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    session.add(row)
+    session.flush()
+    session.add(ConsentRecord(
+        tenant_id=DEFAULT_TENANT_ID, subject_reference=fingerprint,
+        purpose="respond_to_consumer_enquiry", channel=payload.preferred_channel,
+        consent_status="granted", captured_at=now, notice_version=payload.notice_version,
+        evidence_reference=f"consumer-enquiry:{row.id}:processing",
+    ))
+    if payload.marketing_consent:
+        session.add(ConsentRecord(
+            tenant_id=DEFAULT_TENANT_ID, subject_reference=fingerprint,
+            purpose="electronic_direct_marketing", channel=payload.preferred_channel,
+            consent_status="granted", captured_at=now, notice_version=payload.notice_version,
+            evidence_reference=f"consumer-enquiry:{row.id}:marketing-opt-in",
+        ))
+    session.commit()
+    session.refresh(row)
+    return _consumer_item(row)
+
+
+@app.get("/api/v1/consumer-enquiries/{enquiry_id}/contact")
+def get_consumer_contact(
+    enquiry_id: UUID,
+    x_arletion_consumer_access: str | None = Header(default=None),
+    session: Session = Depends(get_session),
+):
+    _consumer_ready()
+    _consumer_access(x_arletion_consumer_access)
+    row = session.scalar(select(ConsumerEnquiryRow).where(
+        ConsumerEnquiryRow.id == enquiry_id, ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID
+    ))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Consumer enquiry not found.")
+    try:
+        return {
+            "full_name": decrypt_contact(row.name_ciphertext),
+            "phone": decrypt_contact(row.phone_ciphertext) if row.phone_ciphertext else None,
+            "email": decrypt_contact(row.email_ciphertext) if row.email_ciphertext else None,
+        }
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@app.post("/api/v1/consumer-enquiries/{enquiry_id}/withdraw-marketing")
+def withdraw_consumer_marketing(
+    enquiry_id: UUID,
+    x_arletion_consumer_access: str | None = Header(default=None),
+    session: Session = Depends(get_session),
+):
+    _consumer_ready()
+    _consumer_access(x_arletion_consumer_access)
+    row = session.scalar(select(ConsumerEnquiryRow).where(
+        ConsumerEnquiryRow.id == enquiry_id, ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID
+    ))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Consumer enquiry not found.")
+    row.marketing_consent = False
+    row.marketing_consent_at = None
+    records = session.scalars(select(ConsentRecord).where(
+        ConsentRecord.tenant_id == DEFAULT_TENANT_ID,
+        ConsentRecord.subject_reference == row.contact_fingerprint,
+        ConsentRecord.purpose == "electronic_direct_marketing",
+        ConsentRecord.consent_status == "granted",
+    )).all()
+    now = datetime.now(timezone.utc)
+    for record in records:
+        record.consent_status = "withdrawn"
+        record.withdrawn_at = now
+    session.add(SuppressionRecord(
+        tenant_id=DEFAULT_TENANT_ID, subject_reference=row.contact_fingerprint,
+        channel=row.preferred_channel, reason="Consumer withdrew electronic marketing consent",
+        status="active",
+    ))
+    session.commit()
+    return {"id": str(row.id), "marketing_consent": False, "suppressed": True}
+
+
 @app.post("/api/v1/leads", response_model=Lead, status_code=201)
 def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
     campaign=session.scalar(select(CampaignRow).where(CampaignRow.id==payload.campaign_id,CampaignRow.tenant_id==DEFAULT_TENANT_ID))
