@@ -21,7 +21,7 @@ Use these exact labels so Arletion can map the submitted values:
 - Phone number (required when Phone or WhatsApp is the preferred channel)
 - Email address (required when Email is the preferred channel)
 - Province
-- Town / locality
+- Town / locality (optional; omit it when not needed)
 - Preferred contact channel (Phone, WhatsApp or Email)
 - Debt-review situation (Considering debt review, Already under debt review, Application pending, Debt-review assistance, Completed debt review, Debt counselling, Budget guidance, or General enquiry)
 - I confirm I am 18 years or older (required checkbox with an affirmative option)
