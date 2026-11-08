@@ -100,6 +100,7 @@ export interface ConsumerEnquiry {
 export interface ConsumerStatus {
   enabled: boolean;
   storage_approved: boolean;
+  staff_access_approved: boolean;
   encryption_configured: boolean;
   deduplication_key_configured: boolean;
   separate_contact_access_configured: boolean;
