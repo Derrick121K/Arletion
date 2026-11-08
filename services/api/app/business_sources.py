@@ -71,7 +71,7 @@ def overpass_query(category: str, latitude: float, longitude: float, radius_m: i
         clauses.append(
             f'nwr(around:{radius_m},{latitude:.6f},{longitude:.6f})["name"]{tag_filter};'
         )
-    return "[out:json][timeout:35];\n(\n" + "\n".join(clauses) + f"\n);\nout center tags meta {limit};"
+    return "[out:json][timeout:35];\\n(\\n" + "\\n".join(clauses) + f"\\n);\\nout center meta {limit};"
 
 
 def _safe_website(value: str | None) -> str | None:
@@ -157,6 +157,6 @@ def fetch_osm_businesses(category: str, latitude: float, longitude: float, radiu
             if len(response.content) > 8_000_000:
                 raise ValueError("OpenStreetMap response exceeded the 8 MB safety limit.")
             payload = response.json()
-    except (httpx.HTTPError, ValueError) as error:
+            return normalize_osm_businesses(payload, category, locality, province)
+    except (httpx.HTTPError, ValueError, TypeError) as error:
         raise RuntimeError("OpenStreetMap could not complete this search. Retry later or reduce the search radius.") from error
-    return normalize_osm_businesses(payload, category, locality, province)
