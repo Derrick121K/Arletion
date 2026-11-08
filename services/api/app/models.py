@@ -127,6 +127,7 @@ class ConsumerEnquiry(Base):
     name_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
     phone_ciphertext: Mapped[str | None] = mapped_column(Text)
     email_ciphertext: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(40), nullable=False, default="general")
     province: Mapped[str | None] = mapped_column(Text)
     locality: Mapped[str | None] = mapped_column(Text)
     preferred_channel: Mapped[str] = mapped_column(String(16), nullable=False)
@@ -142,6 +143,7 @@ class ConsumerEnquiry(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "campaign_id", "contact_fingerprint", name="consumer_enquiry_campaign_contact_uq"),
         CheckConstraint("preferred_channel IN ('phone','email','whatsapp')", name="consumer_enquiry_channel_check"),
+        CheckConstraint("category IN ('debt_counselling','debt_review_information','budget_guidance','general')", name="consumer_enquiry_category_check"),
         CheckConstraint("status IN ('new','contacted','qualified','converted','disqualified','suppressed')", name="consumer_enquiry_status_check"),
         Index("consumer_enquiries_tenant_status_created_idx", "tenant_id", "status", "created_at"),
         Index("consumer_enquiries_retention_idx", "retention_expires_at"),
