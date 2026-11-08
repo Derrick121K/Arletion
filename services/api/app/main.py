@@ -1133,7 +1133,7 @@ def import_ncr_debt_counsellors(payload: NCRDebtCounsellorImportWrite, session: 
             session.add(organization)
             session.flush()
         else:
-            organization.canonical_name = item["trading_name"] or item["full_name"]
+            organization.canonical_name = item["trading_name"] or f"Registered debt counsellor {key}"
             organization.locality = item["town"]
             organization.business_category = "Debt counselling partners"
         lead = session.scalar(select(LeadRow).where(
