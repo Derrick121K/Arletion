@@ -74,7 +74,7 @@ export interface LeadPage {
 
 export function loadLeadPage(
   apiBaseUrl: string,
-  filters?: { q?: string; lead_type?: string; category?: string; status?: string; province?: string; verification_status?: string; page?: number; page_size?: number },
+  filters?: { q?: string; lead_type?: string; category?: string; status?: string; province?: string; verification_status?: "unverified" | "source_confirmed" | "officially_verified" | "needs_review"; page?: number; page_size?: number },
   fetcher?: typeof fetch,
 ): Promise<LeadPage>;
 
