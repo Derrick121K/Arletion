@@ -38,8 +38,8 @@ def upgrade() -> None:
             'https://www.openstreetmap.org/',
             'business_directory_osm',
             'Open Database License (ODbL) 1.0; attribution required: © OpenStreetMap contributors',
-            'approved',
-            TRUE,
+            'review_required',
+            FALSE,
             '{"provider":"Overpass API","max_results_per_import":200,"minimum_interval_seconds":60}'::jsonb,
             '{"retain_source_object_id":true,"retain_source_timestamp":true}'::jsonb
         )
