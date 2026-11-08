@@ -1,3 +1,7 @@
+import base64
+import hashlib
+import hmac
+import json
 import os
 import unittest
 from datetime import datetime, timezone
@@ -161,10 +165,11 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         with self.engine.begin() as connection:
             # Keep migration-seeded reference rows; clear tenant-owned/test data.
             connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, consumer_enquiries, leads, opportunities, source_records, campaigns, organizations RESTART IDENTITY CASCADE"))
-            connection.execute(text("DELETE FROM source_registry WHERE id NOT IN ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000004')"))
+            connection.execute(text("DELETE FROM source_registry WHERE id NOT IN ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000005')"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL WHERE id = '00000000-0000-0000-0000-000000000002'"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'approved', enabled = TRUE, last_error = NULL, last_synced_at = NULL WHERE id = '00000000-0000-0000-0000-000000000003'"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL, last_synced_at = NULL WHERE id = '00000000-0000-0000-0000-000000000004'"))
+            connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL, last_synced_at = NULL WHERE id = '00000000-0000-0000-0000-000000000005'"))
 
     def test_source_can_be_explicitly_approved_after_manual_review(self):
         response = api_request(
@@ -636,6 +641,116 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             ciphertext = connection.execute(text("SELECT name_ciphertext, phone_ciphertext FROM consumer_enquiries")).one()
         self.assertNotIn("Public Enquiry Example", ciphertext.name_ciphertext)
         self.assertNotIn("+27821234567", ciphertext.phone_ciphertext)
+
+    def test_tally_webhook_requires_signature_consent_and_deduplicates_retries(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Tally debt-review enquiries", "objective": "Respond to voluntary Tally form submissions",
+            "lead_type": "consumer_enquiry", "status": "active",
+            "criteria": {"tally_intake": True, "enquiry_category": "considering_debt_review"},
+        })
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        campaign_id = campaign.json()["id"]
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_registry SET permitted_use='approved', enabled=TRUE "
+                "WHERE id='00000000-0000-0000-0000-000000000005'"
+            ))
+        secret = "tally-webhook-test-secret-with-at-least-32-chars"
+        settings = {
+            "ARLETION_CONSUMER_INTAKE_ENABLED": "true",
+            "ARLETION_CONSUMER_STORAGE_APPROVED": "true",
+            "ARLETION_CONSUMER_RBAC_APPROVED": "true",
+            "ARLETION_PII_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+            "ARLETION_CONTACT_HASH_KEY": "tally-webhook-fingerprint-key-at-least-32-characters",
+            "ARLETION_CONSUMER_ACCESS_KEY": "separate-test-contact-access-secret",
+            "ARLETION_CONSUMER_RETENTION_DAYS": "90",
+            "ARLETION_TALLY_WEBHOOK_ENABLED": "true",
+            "ARLETION_TALLY_WEBHOOK_SECRET": secret,
+            "ARLETION_TALLY_FORM_ID": "FORM123",
+            "ARLETION_TALLY_CAMPAIGN_ID": campaign_id,
+            "ARLETION_TALLY_NOTICE_VERSION": "tally-test-v1",
+        }
+        payload = {
+            "eventId": "event-tally-001",
+            "eventType": "FORM_RESPONSE",
+            "createdAt": "2026-11-08T12:00:00.000Z",
+            "data": {
+                "responseId": "submission-001",
+                "formId": "FORM123",
+                "fields": [
+                    {"label": "Full name", "type": "INPUT_TEXT", "value": "Tally Test Person"},
+                    {"label": "Phone number", "type": "INPUT_PHONE_NUMBER", "value": "+27821234567"},
+                    {"label": "Email address", "type": "INPUT_EMAIL", "value": "tally-test@example.com"},
+                    {"label": "Province", "type": "DROPDOWN", "value": "Mpumalanga"},
+                    {"label": "Town / locality", "type": "INPUT_TEXT", "value": "eMalahleni"},
+                    {"label": "Preferred contact channel", "type": "MULTIPLE_CHOICE", "value": "WhatsApp"},
+                    {"label": "Debt-review situation", "type": "MULTIPLE_CHOICE", "value": "Already under debt review"},
+                    {"label": "I confirm I am 18 years or older", "type": "CHECKBOXES", "value": ["I confirm I am 18 years or older"]},
+                    {"label": "I consent to Arletion processing my details to respond to this enquiry", "type": "CHECKBOXES", "value": ["I consent to Arletion processing my details to respond to this enquiry"]},
+                    {"label": "I agree to receive optional marketing messages", "type": "CHECKBOXES", "value": []},
+                ],
+            },
+        }
+        canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        signature = base64.b64encode(hmac.new(secret.encode(), canonical, hashlib.sha256).digest()).decode("ascii")
+        headers = {"Tally-Signature": signature}
+        with patch.dict(os.environ, settings):
+            forged = api_request("POST", "/api/v1/webhooks/tally", json=payload, headers={"Tally-Signature": "invalid"})
+            self.assertEqual(forged.status_code, 401)
+            wrong_form_payload = {**payload, "data": {**payload["data"], "formId": "OTHER"}}
+            wrong_form_canonical = json.dumps(wrong_form_payload, ensure_ascii=False, separators=(",", ":")).encode()
+            wrong_form_signature = base64.b64encode(hmac.new(secret.encode(), wrong_form_canonical, hashlib.sha256).digest()).decode()
+            wrong_form = api_request("POST", "/api/v1/webhooks/tally", json=wrong_form_payload, headers={"Tally-Signature": wrong_form_signature})
+            self.assertEqual(wrong_form.status_code, 409)
+            denied_payload = {**payload, "eventId": "event-tally-no-consent", "data": {
+                **payload["data"],
+                "fields": [field for field in payload["data"]["fields"] if field["label"] != "I consent to Arletion processing my details to respond to this enquiry"],
+            }}
+            denied_canonical = json.dumps(denied_payload, ensure_ascii=False, separators=(",", ":")).encode()
+            denied_signature = base64.b64encode(hmac.new(secret.encode(), denied_canonical, hashlib.sha256).digest()).decode()
+            no_consent = api_request("POST", "/api/v1/webhooks/tally", json=denied_payload, headers={"Tally-Signature": denied_signature})
+            self.assertEqual(no_consent.status_code, 422)
+            created = api_request("POST", "/api/v1/webhooks/tally", json=payload, headers=headers)
+            self.assertEqual(created.status_code, 200, created.text)
+            self.assertTrue(created.json()["accepted"])
+            self.assertFalse(created.json()["duplicate_event"])
+            self.assertTrue(created.json()["created"])
+            self.assertEqual(created.json()["category"], "already_under_review")
+            retry = api_request("POST", "/api/v1/webhooks/tally", json=payload, headers=headers)
+            self.assertEqual(retry.status_code, 200, retry.text)
+            self.assertTrue(retry.json()["duplicate_event"])
+            second_payload = {**payload, "eventId": "event-tally-002"}
+            second_canonical = json.dumps(second_payload, ensure_ascii=False, separators=(",", ":")).encode()
+            second_signature = base64.b64encode(hmac.new(secret.encode(), second_canonical, hashlib.sha256).digest()).decode()
+            same_person = api_request("POST", "/api/v1/webhooks/tally", json=second_payload, headers={"Tally-Signature": second_signature})
+            self.assertEqual(same_person.status_code, 200, same_person.text)
+            self.assertFalse(same_person.json()["duplicate_event"])
+            self.assertFalse(same_person.json()["created"])
+        with self.engine.connect() as connection:
+            enquiry_count = connection.execute(text("SELECT count(*) FROM consumer_enquiries")).scalar_one()
+            event_count = connection.execute(text("SELECT count(*) FROM source_records WHERE record_type='tally_webhook_event'")).scalar_one()
+            pii_event_count = connection.execute(text(
+                "SELECT count(*) FROM source_records WHERE record_type='tally_webhook_event' "
+                "AND (raw_payload::text ILIKE '%Tally Test Person%' OR raw_payload::text ILIKE '%tally-test@example.com%' OR raw_payload::text ILIKE '%+27821234567%')"
+            )).scalar_one()
+        self.assertEqual(enquiry_count, 1)
+        self.assertEqual(event_count, 2)
+        self.assertEqual(pii_event_count, 0)
+
+    def test_tally_webhook_status_requires_all_source_and_campaign_gates(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Tally status campaign", "objective": "Test Tally gates",
+            "lead_type": "consumer_enquiry", "status": "active", "criteria": {"tally_intake": True},
+        })
+        with patch.dict(os.environ, {
+            "ARLETION_TALLY_WEBHOOK_ENABLED": "true",
+            "ARLETION_TALLY_WEBHOOK_SECRET": "test-signing-secret",
+            "ARLETION_TALLY_FORM_ID": "FORM123",
+            "ARLETION_TALLY_CAMPAIGN_ID": campaign.json()["id"],
+        }):
+            status = api_request("GET", "/api/v1/consumer-enquiries/status").json()
+        self.assertTrue(status["tally_webhook_configured"])
+        self.assertFalse(status["tally_webhook_enabled"])
 
     def test_ncr_directory_import_creates_deduplicated_partner_leads_only(self):
         campaign = api_request("POST", "/api/v1/campaigns", json={
