@@ -105,6 +105,9 @@ class Lead(Base):
     score: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
     score_breakdown: Mapped[dict[str, Any]] = mapped_column(JSON_VALUE, nullable=False, default=dict)
     qualification_reason: Mapped[str | None] = mapped_column(Text)
+    verification_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unverified", server_default="unverified")
+    verification_source: Mapped[str | None] = mapped_column(Text)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     next_follow_up_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -112,6 +115,7 @@ class Lead(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     __table_args__ = (
         CheckConstraint("score BETWEEN 0 AND 100", name="lead_score_check"),
+        CheckConstraint("verification_status IN ('unverified','source_confirmed','officially_verified','needs_review')", name="lead_verification_status_check"),
         UniqueConstraint("tenant_id", "campaign_id", "organization_id", name="leads_tenant_campaign_organization_uq"),
         Index("leads_tenant_status_score_idx", "tenant_id", "status", "score"),
         Index("leads_tenant_type_status_created_idx", "tenant_id", "lead_type", "status", "created_at"),
