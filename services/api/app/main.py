@@ -1126,7 +1126,7 @@ def import_ncr_debt_counsellors(payload: NCRDebtCounsellorImportWrite, session: 
         ))
         if organization is None:
             organization = Organization(
-                canonical_name=item["trading_name"] or item["full_name"],
+                canonical_name=item["trading_name"] or f"Registered debt counsellor {key}",
                 normalized_name=normalized, country_code="ZA",
                 business_category="Debt counselling partners", locality=item["town"],
             )
@@ -1163,9 +1163,8 @@ def import_ncr_debt_counsellors(payload: NCRDebtCounsellorImportWrite, session: 
             SourceRecord.record_type == "lead_evidence",
         ))
         evidence_payload = {
-            "registration_number": key, "full_name": item["full_name"],
-            "trading_name": item["trading_name"], "registration_date": item["registration_date"],
-            "physical_address": item["physical_address"], "town": item["town"],
+            "registration_number": key, "trading_name": item["trading_name"],
+            "registration_date": item["registration_date"], "town": item["town"],
             "status": "registered", "observed_at": now.isoformat(),
         }
         if evidence is None:
