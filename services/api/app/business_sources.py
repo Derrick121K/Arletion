@@ -1,13 +1,14 @@
 """Low-volume, source-attributed OpenStreetMap business discovery."""
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 import httpx
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OVERPASS_URL_ENV = "ARLETION_OVERPASS_URL"
 OSM_SOURCE = "OpenStreetMap Business Directory"
 OSM_ATTRIBUTION = "© OpenStreetMap contributors · ODbL 1.0"
 
@@ -145,6 +146,12 @@ def normalize_osm_businesses(payload: dict, category: str, locality: str, provin
 
 
 def fetch_osm_businesses(category: str, latitude: float, longitude: float, radius_m: int, locality: str, province: str, limit: int = 100) -> list[dict]:
+    endpoint = os.getenv(OVERPASS_URL_ENV, "").strip()
+    if not endpoint:
+        raise RuntimeError("Configure ARLETION_OVERPASS_URL with your own or paid Overpass endpoint. Arletion does not use the shared public Overpass server for commercial workloads.")
+    parsed = urlsplit(endpoint)
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise RuntimeError("ARLETION_OVERPASS_URL must be a credential-free HTTPS endpoint.")
     query = overpass_query(category, latitude, longitude, radius_m, limit)
     try:
         with httpx.Client(
@@ -152,11 +159,14 @@ def fetch_osm_businesses(category: str, latitude: float, longitude: float, radiu
             headers={"User-Agent": "Arletion/0.2 (+https://github.com/Derrick121K/Arletion)"},
             follow_redirects=False,
         ) as client:
-            response = client.post(OVERPASS_URL, data={"data": query})
+            response = client.post(endpoint, data={"data": query})
             response.raise_for_status()
             if len(response.content) > 8_000_000:
                 raise ValueError("OpenStreetMap response exceeded the 8 MB safety limit.")
-            payload = response.json()
-            return normalize_osm_businesses(payload, category, locality, province)
+            return normalize_osm_businesses(response.json(), category, locality, province)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 429:
+            raise RuntimeError("The Overpass provider rate-limited this request. Wait before trying again.") from error
+        raise RuntimeError(f"The Overpass provider returned HTTP {error.response.status_code}.") from error
     except (httpx.HTTPError, ValueError, TypeError) as error:
         raise RuntimeError("OpenStreetMap could not complete this search. Retry later or reduce the search radius.") from error
