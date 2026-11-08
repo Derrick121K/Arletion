@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from app.database import engine_for_url, normalize_database_url
 from app.main import app
 from app.models import Base
-from app.procurement import normalize_record, parse_import
+from app.procurement import extract_awarded_business_suppliers, normalize_record, parse_import
 from app.business_sources import OSM_ATTRIBUTION, normalize_osm_businesses, overpass_query
 
 
@@ -256,6 +256,94 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             "source_url": "https://source.example/1", "status": "hacked",
         })
         self.assertEqual(invalid_status.status_code, 422)
+
+    def test_award_supplier_extractor_only_keeps_company_form_entities(self):
+        release = {
+            "ocid": "ocds-9t57fa-award-1",
+            "tender": {"title": "Road maintenance", "classification": {"description": "Construction"}},
+            "awards": [{
+                "id": "award-1",
+                "suppliers": [
+                    {"id": "CSD-12345", "name": "Mpumalanga Infrastructure (Pty) Ltd"},
+                    {"id": "person-1", "name": "John Smith"},
+                ],
+            }],
+        }
+        suppliers = extract_awarded_business_suppliers(
+            release, "https://data.etenders.gov.za/notice/award-1", None,
+        )
+        self.assertEqual(len(suppliers), 1)
+        self.assertEqual(suppliers[0]["supplier_key"], "CSD-12345")
+        self.assertEqual(suppliers[0]["name"], "Mpumalanga Infrastructure (Pty) Ltd")
+        self.assertEqual(suppliers[0]["category"], "Construction")
+        self.assertEqual(suppliers[0]["ocid"], "ocds-9t57fa-award-1")
+
+    def test_treasury_awarded_supplier_import_creates_source_confirmed_business_records(self):
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_registry SET permitted_use='approved', enabled=TRUE "
+                "WHERE id='00000000-0000-0000-0000-000000000002'"
+            ))
+        release = {
+            "ocid": "ocds-9t57fa-awarded-supplier",
+            "id": "release-award-1",
+            "date": "2026-10-20T10:00:00Z",
+            "tender": {
+                "title": "eMalahleni road maintenance",
+                "classification": {"description": "Construction"},
+            },
+            "awards": [{
+                "id": "award-99",
+                "suppliers": [
+                    {"id": "CSD-998877", "name": "Mpumalanga Infrastructure (Pty) Ltd"},
+                    {"id": "person-1", "name": "John Smith"},
+                ],
+            }],
+        }
+        with self.engine.begin() as connection:
+            connection.execute(text("""
+                INSERT INTO source_records (
+                    source_id, external_id, record_type, source_url, raw_payload
+                ) VALUES (
+                    '00000000-0000-0000-0000-000000000002',
+                    'ocds-9t57fa-awarded-supplier#release-award-1',
+                    'ocds_release',
+                    'https://data.etenders.gov.za/notice/award-99',
+                    :payload
+                )
+            """), {"payload": __import__("json").dumps(release)})
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Treasury awarded suppliers", "objective": "Review suppliers named in public awards",
+            "lead_type": "procurement", "geography": "South Africa",
+        })
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        body = {"campaign_id": campaign.json()["id"], "max_releases": 100}
+        first = api_request("POST", "/api/v1/leads/import/etender-awarded-suppliers", json=body)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["unique_awarded_companies"], 1)
+        self.assertEqual(first.json()["inserted"], 1)
+        self.assertEqual(first.json()["verification_status"], "source_confirmed")
+        self.assertIn("CSD registration", first.json()["verification_scope"])
+
+        result = api_request("GET", "/api/v1/leads/search", params={
+            "lead_type": "procurement", "verification_status": "source_confirmed",
+        })
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["total"], 1)
+        lead = result.json()["items"][0]
+        self.assertEqual(lead["organization"], "Mpumalanga Infrastructure (Pty) Ltd")
+        self.assertEqual(lead["source"], "National Treasury eTender Transparency Portal")
+        self.assertEqual(lead["source_url"], "https://data.etenders.gov.za/notice/award-99")
+        self.assertEqual(lead["verification_source"], "National Treasury eTender OCDS award")
+        self.assertNotIn("John Smith", str(result.json()))
+
+        second = api_request("POST", "/api/v1/leads/import/etender-awarded-suppliers", json=body)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["inserted"], 0)
+        self.assertEqual(second.json()["updated"], 1)
+        self.assertEqual(api_request("GET", "/api/v1/leads/search", params={
+            "lead_type": "procurement", "verification_status": "source_confirmed",
+        }).json()["total"], 1)
 
     def test_openstreetmap_query_is_category_scoped_and_bounded(self):
         query = overpass_query("Construction", -25.8762, 29.21, 10000, 100)
