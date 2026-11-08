@@ -142,9 +142,10 @@ class CampaignUpdate(BaseModel):
     criteria: dict[str, Any] | None = None
 
 class LeadWrite(BaseModel):
+    """Business and procurement lead writer; consumers use the protected enquiry table."""
     campaign_id: UUID
     organization: str = Field(min_length=1, max_length=500)
-    lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"]
+    lead_type: Literal["business", "procurement", "partnership"]
     category: str | None = Field(default=None, max_length=120)
     location: str = Field(default="South Africa", max_length=180)
     province: str | None = Field(default=None, max_length=100)
@@ -287,7 +288,7 @@ def update_campaign(campaign_id: UUID, payload: CampaignUpdate, session: Session
 
 @app.get("/api/v1/leads", response_model=list[Lead])
 def get_leads(q: str | None = Query(default=None, max_length=120), lead_type: str | None = None, session: Session = Depends(get_session)):
-    statement=select(LeadRow).where(LeadRow.tenant_id==DEFAULT_TENANT_ID)
+    statement=select(LeadRow).where(LeadRow.tenant_id==DEFAULT_TENANT_ID, LeadRow.lead_type != "consumer_enquiry")
     if lead_type: statement=statement.where(LeadRow.lead_type==lead_type)
     result=[]
     for row in session.scalars(statement.order_by(LeadRow.created_at.desc())).all():
