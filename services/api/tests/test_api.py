@@ -350,7 +350,7 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertIn("around:10000,-25.876200,29.210000", query)
         self.assertIn('"shop"~"^(building_materials|hardware|trade|doityourself)$",i', query)
         self.assertIn('"craft"~"', query)
-        self.assertTrue(query.endswith("out center tags meta 100;"))
+        self.assertTrue(query.endswith("out center meta 100;"))
         with self.assertRaises(ValueError):
             overpass_query("Unknown", -25.8762, 29.21, 10000, 100)
 
