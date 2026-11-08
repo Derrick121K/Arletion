@@ -75,6 +75,7 @@ class ConsumerEnquiryWrite(BaseModel):
     province: str | None = Field(default=None, max_length=100)
     locality: str | None = Field(default=None, max_length=120)
     preferred_channel: Literal["phone", "email", "whatsapp"]
+    category: Literal["debt_counselling", "debt_review_information", "budget_guidance", "general"] = "general"
     source: str = Field(default="website_form", min_length=2, max_length=120)
     processing_consent: bool
     marketing_consent: bool = False
@@ -103,6 +104,7 @@ class ConsumerEnquiryItem(BaseModel):
     contact_protected: bool = True
     has_phone: bool
     has_email: bool
+    category: str
     province: str | None
     locality: str | None
     preferred_channel: str
@@ -217,7 +219,7 @@ def _consumer_access(supplied: str | None) -> None:
 
 def _consumer_item(row: ConsumerEnquiryRow) -> ConsumerEnquiryItem:
     return ConsumerEnquiryItem(
-        id=str(row.id), campaign_id=str(row.campaign_id),
+        id=str(row.id), campaign_id=str(row.campaign_id), category=row.category,
         has_phone=bool(row.phone_ciphertext), has_email=bool(row.email_ciphertext),
         province=row.province, locality=row.locality, preferred_channel=row.preferred_channel,
         source=row.source, status=row.status, processing_consent_at=row.processing_consent_at,
@@ -307,6 +309,7 @@ def search_leads(
     lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"] | None = None,
     category: str | None = Query(default=None, max_length=120),
     status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
+    category: Literal["debt_counselling", "debt_review_information", "budget_guidance", "general"] | None = None,
     province: str | None = Query(default=None, max_length=100),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
@@ -390,6 +393,19 @@ def lead_categories(session: Session = Depends(get_session)):
     ).all()
 
 
+@app.get("/api/v1/consumer-enquiries/status")
+def consumer_intake_status():
+    return {
+        "enabled": consumer_storage_ready(),
+        "storage_approved": os.getenv("ARLETION_CONSUMER_STORAGE_APPROVED", "false").lower() == "true",
+        "encryption_configured": bool(os.getenv("ARLETION_PII_ENCRYPTION_KEY")),
+        "deduplication_key_configured": len(os.getenv("ARLETION_CONTACT_HASH_KEY", "")) >= 32,
+        "separate_contact_access_configured": bool(os.getenv("ARLETION_CONSUMER_ACCESS_KEY")),
+        "public_form": False,
+        "note": "Contact capture remains disabled until all storage and security controls are explicitly enabled.",
+    }
+
+
 @app.get("/api/v1/consumer-enquiries", response_model=ConsumerEnquiryPage)
 def get_consumer_enquiries(
     status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
@@ -402,6 +418,8 @@ def get_consumer_enquiries(
     statement = select(ConsumerEnquiryRow).where(ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID)
     if status:
         statement = statement.where(ConsumerEnquiryRow.status == status)
+    if category:
+        statement = statement.where(ConsumerEnquiryRow.category == category)
     if province:
         statement = statement.where(func.lower(ConsumerEnquiryRow.province) == province.strip().lower())
     total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
@@ -443,7 +461,7 @@ def create_consumer_enquiry(payload: ConsumerEnquiryWrite, session: Session = De
             email_ciphertext=encrypt_contact(payload.email.strip().lower()) if payload.email else None,
             province=payload.province.strip() if payload.province else None,
             locality=payload.locality.strip() if payload.locality else None,
-            preferred_channel=payload.preferred_channel, source=payload.source.strip(),
+            category=payload.category, preferred_channel=payload.preferred_channel, source=payload.source.strip(),
             processing_consent_at=now, marketing_consent=payload.marketing_consent,
             marketing_consent_at=now if payload.marketing_consent else None,
             notice_version=payload.notice_version.strip(),
