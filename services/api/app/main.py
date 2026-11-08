@@ -875,13 +875,9 @@ async def receive_tally_webhook(
         external_id=event_id,
         record_type="tally_webhook_event",
         source_url=f"https://tally.so/forms/{configured_form}",
-        payload_hash=hashlib.sha256(raw_body).hexdigest(),
         raw_payload={
             "event_type": "FORM_RESPONSE",
             "form_id": configured_form,
-            "response_id": str(data.get("responseId") or data.get("submissionId") or "")[:120],
-            "category": category,
-            "marketing_consent": bool(enquiry_payload["marketing_consent"]),
         },
     )
     session.add(receipt)
