@@ -205,6 +205,20 @@ class SourceWrite(BaseModel):
             raise ValueError("url must be an absolute HTTP or HTTPS URL")
         return self
 
+class OfficialBatchImportWrite(BaseModel):
+    start_page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=100, ge=1, le=100)
+    page_count: int = Field(default=4, ge=1, le=4)
+    date_from: date
+    date_to: date
+
+    @model_validator(mode="after")
+    def validate_batch(self):
+        if self.date_to < self.date_from:
+            raise ValueError("date_to must not be earlier than date_from")
+        return self
+
+
 class OfficialImportWrite(BaseModel):
     page_number: int = Field(default=1, ge=1)
     page_size: int = Field(default=50, ge=1, le=100)
@@ -759,6 +773,65 @@ def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
         evidence.source_url=payload.source_url; evidence.raw_payload={"lead_id":str(row.id),"source_external_id":payload.external_id,"evidence_note":payload.evidence_note}
     session.commit(); session.refresh(row)
     return get_leads(q=payload.organization,lead_type=None,session=session)[0]
+@app.post("/api/v1/opportunities/import/official/batch")
+def import_official_opportunity_batch(payload: OfficialBatchImportWrite, session: Session = Depends(get_session)):
+    source = session.scalar(select(SourceRegistry).where(
+        SourceRegistry.name == "National Treasury eTender Transparency Portal"
+    ))
+    if source is None or not source.enabled or source.permitted_use != "approved":
+        raise HTTPException(status_code=409, detail="Approve the National Treasury eTender source before importing.")
+    import urllib.error, urllib.parse, urllib.request
+
+    totals = {"inserted": 0, "updated": 0, "unchanged": 0, "stale_releases": 0, "duplicates_in_input": 0, "skipped": 0}
+    pages_imported = releases_received = 0
+    next_page = payload.start_page
+    warning = None
+    for page in range(payload.start_page, payload.start_page + payload.page_count):
+        params = {
+            "PageNumber": page, "PageSize": payload.page_size,
+            "dateFrom": payload.date_from.isoformat(), "dateTo": payload.date_to.isoformat(),
+        }
+        request = urllib.request.Request(
+            "https://ocds-api.etenders.gov.za/api/OCDSReleases?" + urllib.parse.urlencode(params),
+            headers={"Accept": "application/json", "User-Agent": "Arletion/0.2 (National Treasury OCDS import)"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                raw = response.read(20_000_001)
+            if len(raw) > 20_000_000:
+                raise ValueError("Official API response exceeded the 20 MB safety limit.")
+            records = parse_import(raw.decode("utf-8-sig"), "json")
+        except urllib.error.HTTPError as error:
+            warning = f"Official eTender API returned HTTP {error.code} on page {page}."
+            break
+        except (urllib.error.URLError, TimeoutError) as error:
+            warning = f"Official eTender API was unreachable on page {page} ({error.__class__.__name__})."
+            break
+        except (UnicodeDecodeError, ValueError) as error:
+            warning = f"Official eTender page {page} could not be parsed ({error.__class__.__name__})."
+            break
+        if not records:
+            next_page = page
+            break
+        result = import_opportunities(session, records)
+        for key in totals:
+            totals[key] += result[key]
+        pages_imported += 1
+        releases_received += len(records)
+        next_page = page + 1
+        if len(records) < payload.page_size:
+            break
+
+    if warning and pages_imported == 0:
+        raise HTTPException(status_code=502, detail=warning)
+    return {
+        **totals, "source": "National Treasury eTender Transparency Portal",
+        "pages_imported": pages_imported, "releases_received": releases_received,
+        "next_page": next_page, "warning": warning,
+        "has_more": pages_imported == payload.page_count and warning is None and releases_received == pages_imported * payload.page_size,
+    }
+
+
 @app.post("/api/v1/leads/import/etender-awarded-suppliers")
 def import_etender_awarded_suppliers(payload: EtenderAwardSupplierImportWrite, session: Session = Depends(get_session)):
     source = session.get(SourceRegistry, ETENDERS_SOURCE_ID) or session.scalar(
