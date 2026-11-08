@@ -187,3 +187,9 @@ export function recordLeadVerification(
   payload: { registry: "CSD" | "CIPC"; result: "verified" | "not_found" | "inactive" | "restricted" | "unknown"; evidence_url: string; reference: string; note?: string; checked_at: string },
   fetcher?: typeof fetch,
 ): Promise<LeadVerificationResult>;
+
+export function importFreeAwardedSupplierLeads(
+  apiBaseUrl: string,
+  request: { campaign_id: string; start_page: number; page_count: number; date_from: string; date_to: string; max_releases: number },
+  fetcher?: typeof fetch,
+): Promise<{ batch: OfficialBatchImportResult; suppliers: AwardedSupplierImportResult }>;
