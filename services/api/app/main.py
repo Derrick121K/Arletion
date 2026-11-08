@@ -701,7 +701,8 @@ def _tally_value(fields: list[dict[str, Any]], labels: set[str]) -> Any:
                     str(option.get("id")): str(option.get("text") or "")
                     for option in options if isinstance(option, dict) and option.get("id") is not None
                 }
-                return [option_text.get(str(item), str(item)) for item in value]
+                selected = [option_text.get(str(item), str(item)) for item in value]
+                return selected[0] if len(selected) == 1 else selected
             return value
     return None
 
