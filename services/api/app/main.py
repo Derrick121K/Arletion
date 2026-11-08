@@ -397,6 +397,7 @@ def consumer_intake_status():
     return {
         "enabled": consumer_storage_ready(),
         "storage_approved": os.getenv("ARLETION_CONSUMER_STORAGE_APPROVED", "false").lower() == "true",
+        "staff_access_approved": os.getenv("ARLETION_CONSUMER_RBAC_APPROVED", "false").lower() == "true",
         "encryption_configured": bool(os.getenv("ARLETION_PII_ENCRYPTION_KEY")),
         "deduplication_key_configured": len(os.getenv("ARLETION_CONTACT_HASH_KEY", "")) >= 32,
         "separate_contact_access_configured": bool(os.getenv("ARLETION_CONSUMER_ACCESS_KEY")),
