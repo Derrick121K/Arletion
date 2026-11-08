@@ -193,3 +193,19 @@ export function importFreeAwardedSupplierLeads(
   request: { campaign_id: string; start_page: number; page_count: number; date_from: string; date_to: string; max_releases: number },
   fetcher?: typeof fetch,
 ): Promise<{ batch: OfficialBatchImportResult; suppliers: AwardedSupplierImportResult }>;
+
+export interface NCRDebtCounsellorImportResult {
+  source: string;
+  keyword: string;
+  page: number;
+  matched: number;
+  inserted: number;
+  updated: number;
+  verification_status: "source_confirmed";
+  note: string;
+}
+export function importNCRDebtCounsellors(
+  apiBaseUrl: string,
+  request: { campaign_id: string; keyword?: string; page?: number; limit?: number },
+  fetcher?: typeof fetch,
+): Promise<NCRDebtCounsellorImportResult>;
