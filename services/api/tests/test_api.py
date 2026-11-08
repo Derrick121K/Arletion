@@ -309,7 +309,7 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
                     'ocds-9t57fa-awarded-supplier#release-award-1',
                     'ocds_release',
                     'https://data.etenders.gov.za/notice/award-99',
-                    :payload
+                    CAST(:payload AS jsonb)
                 )
             """), {"payload": __import__("json").dumps(release)})
         campaign = api_request("POST", "/api/v1/campaigns", json={
