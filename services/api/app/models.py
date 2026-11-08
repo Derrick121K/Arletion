@@ -147,7 +147,7 @@ class ConsumerEnquiry(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "campaign_id", "contact_fingerprint", name="consumer_enquiry_campaign_contact_uq"),
         CheckConstraint("preferred_channel IN ('phone','email','whatsapp')", name="consumer_enquiry_channel_check"),
-        CheckConstraint("category IN ('debt_counselling','debt_review_information','budget_guidance','general')", name="consumer_enquiry_category_check"),
+        CheckConstraint("category IN ('debt_counselling','debt_review_information','considering_debt_review','already_under_review','application_pending','debt_review_assistance','completed_debt_review','budget_guidance','general')", name="consumer_enquiry_category_check"),
         CheckConstraint("status IN ('new','contacted','qualified','converted','disqualified','suppressed')", name="consumer_enquiry_status_check"),
         Index("consumer_enquiries_tenant_status_created_idx", "tenant_id", "status", "created_at"),
         Index("consumer_enquiries_retention_idx", "retention_expires_at"),

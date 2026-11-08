@@ -28,6 +28,8 @@ services:
         generateValue: true
       - key: ARLETION_CONSUMER_INTAKE_ENABLED
         value: "false"
+      - key: ARLETION_PUBLIC_CONSUMER_FORM_ENABLED
+        value: "false"
       - key: ARLETION_CONSUMER_STORAGE_APPROVED
         value: "false"
       - key: ARLETION_CONSUMER_RBAC_APPROVED

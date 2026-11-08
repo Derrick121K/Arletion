@@ -13,6 +13,7 @@ from app.main import app
 from app.models import Base
 from app.procurement import extract_awarded_business_suppliers, normalize_record, parse_import
 from app.business_sources import OSM_ATTRIBUTION, normalize_osm_businesses, overpass_query
+from app.ncr_sources import parse_registered_counsellors
 
 
 def api_request(method: str, path: str, **kwargs):
@@ -21,6 +22,24 @@ def api_request(method: str, path: str, **kwargs):
 
 
 class ApiUnitTests(unittest.TestCase):
+    def test_ncr_registered_counsellor_parser_keeps_only_unique_registered_entries(self):
+        html = """<main>
+        <div>Full Name : Alex Example</div><div>Trading Name : Example Debt Care</div>
+        <div>Phone : 012 345 6789</div><div>Fax :</div><div>Email Address : alex@example.test</div>
+        <div>Final Registration Date : 06/17/2026</div><div>NCR Registration No. NCRDC9876</div>
+        <div>Physical Address : 10 Main Road, eMalahleni</div><div>Postal Address : PO Box 1</div>
+        <div>Town : eMalahleni</div><div>Registered!</div>
+        <div>Full Name : Canceled Example</div><div>Trading Name : Not Registered</div>
+        </main>"""
+        rows = parse_registered_counsellors(html, "https://www.ncr.org.za/register_of_registrants/registered_dc.php?page=1")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["registration_number"], "NCRDC9876")
+        self.assertEqual(rows[0]["trading_name"], "Example Debt Care")
+        self.assertEqual(rows[0]["town"], "eMalahleni")
+        self.assertEqual(rows[0]["status"], "registered")
+        self.assertNotIn("phone", rows[0])
+        self.assertNotIn("email", rows[0])
+
     def test_hosted_postgres_urls_select_psycopg3(self):
         self.assertEqual(
             normalize_database_url("postgres://user:pass@db.example:5432/app"),
@@ -142,9 +161,10 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         with self.engine.begin() as connection:
             # Keep migration-seeded reference rows; clear tenant-owned/test data.
             connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, consumer_enquiries, leads, opportunities, source_records, campaigns, organizations RESTART IDENTITY CASCADE"))
-            connection.execute(text("DELETE FROM source_registry WHERE id NOT IN ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003')"))
+            connection.execute(text("DELETE FROM source_registry WHERE id NOT IN ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000004')"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL WHERE id = '00000000-0000-0000-0000-000000000002'"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'approved', enabled = TRUE, last_error = NULL, last_synced_at = NULL WHERE id = '00000000-0000-0000-0000-000000000003'"))
+            connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL, last_synced_at = NULL WHERE id = '00000000-0000-0000-0000-000000000004'"))
 
     def test_source_can_be_explicitly_approved_after_manual_review(self):
         response = api_request(
@@ -572,6 +592,108 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertFalse(status.json()["public_form"])
         self.assertEqual(listing.status_code, 503)
         self.assertIn("disabled", listing.json()["detail"].lower())
+
+    def test_public_debt_review_intake_requires_gates_and_keeps_enquiries_separate(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Public debt review enquiries", "objective": "Respond to voluntary requests",
+            "lead_type": "consumer_enquiry", "status": "active",
+            "criteria": {"public_intake": True, "enquiry_category": "already_under_review"},
+        })
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        body = {
+            "full_name": "Public Enquiry Example", "phone": "+27821234567",
+            "province": "Mpumalanga", "locality": "eMalahleni",
+            "preferred_channel": "phone", "category": "already_under_review",
+            "processing_consent": True, "marketing_consent": False,
+            "age_confirmed": True,
+        }
+        settings = {
+            "ARLETION_CONSUMER_INTAKE_ENABLED": "true",
+            "ARLETION_CONSUMER_STORAGE_APPROVED": "true",
+            "ARLETION_CONSUMER_RBAC_APPROVED": "true",
+            "ARLETION_PII_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+            "ARLETION_CONTACT_HASH_KEY": "public-enquiry-hash-key-at-least-32-characters",
+            "ARLETION_CONSUMER_ACCESS_KEY": "separate-public-enquiry-access-secret",
+            "ARLETION_CONSUMER_RETENTION_DAYS": "90",
+            "ARLETION_PUBLIC_CONSUMER_FORM_ENABLED": "false",
+        }
+        with patch.dict(os.environ, settings):
+            disabled = api_request("POST", "/api/v1/public/consumer-enquiries", json=body)
+            self.assertEqual(disabled.status_code, 503)
+            with patch.dict(os.environ, {"ARLETION_PUBLIC_CONSUMER_FORM_ENABLED": "true"}):
+                created = api_request("POST", "/api/v1/public/consumer-enquiries", json=body)
+                self.assertEqual(created.status_code, 201, created.text)
+                self.assertTrue(created.json()["contact_protected"])
+                self.assertEqual(created.json()["category"], "already_under_review")
+                self.assertNotIn("full_name", created.json())
+                self.assertNotIn("phone", created.json())
+                listed = api_request("GET", "/api/v1/consumer-enquiries", params={"category": "already_under_review"})
+                self.assertEqual(listed.status_code, 200, listed.text)
+                self.assertEqual(listed.json()["total"], 1)
+                bad_age = api_request("POST", "/api/v1/public/consumer-enquiries", json={**body, "age_confirmed": False})
+                self.assertEqual(bad_age.status_code, 422)
+        with self.engine.connect() as connection:
+            ciphertext = connection.execute(text("SELECT name_ciphertext, phone_ciphertext FROM consumer_enquiries")).one()
+        self.assertNotIn("Public Enquiry Example", ciphertext.name_ciphertext)
+        self.assertNotIn("+27821234567", ciphertext.phone_ciphertext)
+
+    def test_ncr_directory_import_creates_deduplicated_partner_leads_only(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Debt counsellor partners", "objective": "Identify registered counsellor partnership prospects",
+            "lead_type": "partnership",
+        }).json()
+        body = {"campaign_id": campaign["id"], "keyword": "eMalahleni", "page": 1, "limit": 100}
+        denied = api_request("POST", "/api/v1/leads/import/ncr-debt-counsellors", json=body)
+        self.assertEqual(denied.status_code, 409)
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_registry SET permitted_use='approved', enabled=TRUE "
+                "WHERE id='00000000-0000-0000-0000-000000000004'"
+            ))
+        records = [
+            {
+                "full_name": "Alex Example", "trading_name": "Example Debt Care",
+                "registration_number": "NCRDC9876", "registration_date": "06/17/2026",
+                "physical_address": "10 Main Road, eMalahleni", "town": "eMalahleni",
+                "source_url": "https://www.ncr.org.za/register_of_registrants/registered_dc.php?keyword=eMalahleni",
+                "status": "registered",
+            },
+            {
+                "full_name": "Sam Example", "trading_name": "Highveld Counselling",
+                "registration_number": "NCRDC9877", "registration_date": "07/17/2026",
+                "physical_address": "12 Main Road, eMalahleni", "town": "eMalahleni",
+                "source_url": "https://www.ncr.org.za/register_of_registrants/registered_dc.php?keyword=eMalahleni",
+                "status": "registered",
+            },
+        ]
+        with patch("app.main.fetch_registered_counsellors", return_value=records):
+            first = api_request("POST", "/api/v1/leads/import/ncr-debt-counsellors", json=body)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["matched"], 2)
+        self.assertEqual(first.json()["inserted"], 2)
+        self.assertEqual(first.json()["verification_status"], "source_confirmed")
+        self.assertIn("no outreach was sent", first.json()["note"])
+        leads = api_request("GET", "/api/v1/leads/search", params={
+            "lead_type": "partnership", "category": "Debt counselling partners",
+        }).json()
+        self.assertEqual(leads["total"], 2)
+        self.assertEqual({item["organization"] for item in leads["items"]}, {"Example Debt Care", "Highveld Counselling"})
+        self.assertTrue(all(item["verification_status"] == "source_confirmed" for item in leads["items"]))
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_registry SET last_synced_at = NULL WHERE id='00000000-0000-0000-0000-000000000004'"
+            ))
+        with patch("app.main.fetch_registered_counsellors", return_value=records):
+            second = api_request("POST", "/api/v1/leads/import/ncr-debt-counsellors", json=body)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["inserted"], 0)
+        self.assertEqual(second.json()["updated"], 2)
+        with self.engine.connect() as connection:
+            count = connection.execute(text(
+                "SELECT count(*) FROM leads JOIN organizations ON organizations.id=leads.organization_id "
+                "WHERE organizations.business_category='Debt counselling partners'"
+            )).scalar_one()
+        self.assertEqual(count, 2)
 
     def test_consumer_enquiries_use_separate_encrypted_records_and_separate_marketing_consent(self):
         campaign = api_request("POST", "/api/v1/campaigns", json={
