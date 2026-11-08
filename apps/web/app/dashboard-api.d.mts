@@ -3,6 +3,7 @@ export interface Campaign {
   name: string;
   objective: string;
   lead_type: string;
+  pipeline: "business_procurement" | "consumer";
   geography: string;
   status: string;
   lead_count: number;
@@ -35,6 +36,8 @@ export interface Source {
 export interface Summary {
   campaigns: number;
   leads: number;
+  business_leads: number;
+  consumer_enquiries: number;
   sources: number;
   qualified: number;
   demo_mode: boolean;
