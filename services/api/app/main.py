@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone
 import hmac
 import os
 from typing import Any, Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -52,8 +53,16 @@ class Campaign(BaseModel):
     lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"]
     geography: str; status: Literal["draft", "active", "paused", "archived"]; lead_count: int = 0
 class Lead(BaseModel):
-    id: str; organization: str; lead_type: str; location: str; source: str; source_url: str
-    status: str; score: int = Field(ge=0, le=100); evidence_note: str; demo: bool = True
+    id: str; organization: str; lead_type: str; category: str | None = None; location: str
+    province: str | None = None; source: str; source_url: str; status: str
+    score: int = Field(ge=0, le=100); evidence_note: str; demo: bool = True
+
+class LeadPage(BaseModel):
+    items: list[Lead]
+    categories: list[str]
+    page: int
+    page_size: int
+    total: int
 class Source(BaseModel):
     id: str; name: str; category: str; url: str
     status: Literal["planned", "review_required", "enabled", "disabled"]; note: str
@@ -78,13 +87,21 @@ class LeadWrite(BaseModel):
     campaign_id: UUID
     organization: str = Field(min_length=1, max_length=500)
     lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"]
-    location: str = "South Africa"
+    category: str | None = Field(default=None, max_length=120)
+    location: str = Field(default="South Africa", max_length=180)
     source: str = Field(min_length=1, max_length=300)
-    source_url: str = Field(min_length=1, max_length=2000)
-    status: str = "new"
+    source_url: str = Field(min_length=8, max_length=2000)
+    status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] = "new"
     score: int = Field(default=0, ge=0, le=100)
-    evidence_note: str = ""
-    external_id: str | None = None
+    evidence_note: str = Field(default="", max_length=2000)
+    external_id: str | None = Field(default=None, max_length=300)
+
+    @model_validator(mode="after")
+    def validate_source_url(self):
+        parsed = urlsplit(self.source_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("source_url must be an absolute HTTP or HTTPS URL")
+        return self
 
 class SourceWrite(BaseModel):
     name: str = Field(min_length=1, max_length=300)
@@ -151,7 +168,7 @@ def update_campaign(campaign_id: UUID, payload: CampaignUpdate, session: Session
     geography=row.geography if isinstance(row.geography,str) else ", ".join(str(value) for value in row.geography.values() if value)
     return Campaign(id=str(row.id),name=row.name,objective=row.objective,lead_type=row.lead_type,geography=geography or "South Africa",status=row.status,lead_count=session.scalar(select(func.count(LeadRow.id)).where(LeadRow.campaign_id==row.id)) or 0)
 @app.get("/api/v1/leads", response_model=list[Lead])
-def get_leads(q: str | None = Query(default=None), lead_type: str | None = None, session: Session = Depends(get_session)):
+def get_leads(q: str | None = Query(default=None, max_length=120), lead_type: str | None = None, session: Session = Depends(get_session)):
     statement=select(LeadRow).where(LeadRow.tenant_id==DEFAULT_TENANT_ID)
     if lead_type: statement=statement.where(LeadRow.lead_type==lead_type)
     result=[]
@@ -160,9 +177,99 @@ def get_leads(q: str | None = Query(default=None), lead_type: str | None = None,
         evidence=session.scalar(select(SourceRecord).where(SourceRecord.external_id==str(row.id)))
         source=session.get(SourceRegistry,evidence.source_id) if evidence else None
         location=", ".join(x for x in [org.locality if org else None,org.municipality if org else None,org.province if org else None] if x) or "South Africa"
-        item=Lead(id=str(row.id),organization=org.canonical_name if org else "Unspecified organization",lead_type=row.lead_type,location=location,source=source.name if source else "Source record",source_url=evidence.source_url if evidence else "https://data.etenders.gov.za/",status=row.status,score=row.score,evidence_note=row.qualification_reason or "Source evidence attached.",demo=False)
+        item=Lead(id=str(row.id),organization=org.canonical_name if org else "Unspecified organization",lead_type=row.lead_type,category=org.business_category if org else None,location=location,province=org.province if org else None,source=source.name if source else "Source record",source_url=evidence.source_url if evidence else "https://data.etenders.gov.za/",status=row.status,score=row.score,evidence_note=row.qualification_reason or "Source evidence attached.",demo=False)
         if not q or q.casefold() in item.organization.casefold() or q.casefold() in item.location.casefold(): result.append(item)
     return result
+
+
+@app.get("/api/v1/leads/search", response_model=LeadPage)
+def search_leads(
+    q: str | None = Query(default=None, max_length=120),
+    lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"] | None = None,
+    category: str | None = Query(default=None, max_length=120),
+    status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
+    province: str | None = Query(default=None, max_length=100),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    session: Session = Depends(get_session),
+):
+    """Filter leads in PostgreSQL and return a bounded page plus real category facets."""
+    statement = select(LeadRow, Organization).outerjoin(
+        Organization, LeadRow.organization_id == Organization.id
+    ).where(LeadRow.tenant_id == DEFAULT_TENANT_ID)
+    if lead_type:
+        statement = statement.where(LeadRow.lead_type == lead_type)
+    if category:
+        statement = statement.where(func.lower(Organization.business_category) == category.strip().lower())
+    if status:
+        statement = statement.where(LeadRow.status == status)
+    if province:
+        statement = statement.where(func.lower(Organization.province) == province.strip().lower())
+    if q:
+        term = f"%{q.strip()}%"
+        statement = statement.where(
+            or_(
+                Organization.canonical_name.ilike(term),
+                Organization.locality.ilike(term),
+                Organization.municipality.ilike(term),
+                Organization.province.ilike(term),
+            )
+        )
+    total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    rows = session.execute(
+        statement.order_by(LeadRow.created_at.desc(), LeadRow.id)
+        .offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    items = []
+    for row, org in rows:
+        evidence = session.scalar(select(SourceRecord).where(
+            SourceRecord.record_type == "lead_evidence",
+            SourceRecord.external_id == str(row.id),
+        ))
+        source = session.get(SourceRegistry, evidence.source_id) if evidence else None
+        location = ", ".join(value for value in [
+            org.locality if org else None,
+            org.municipality if org else None,
+            org.province if org else None,
+        ] if value) or "South Africa"
+        items.append(Lead(
+            id=str(row.id),
+            organization=org.canonical_name if org else "Unspecified organization",
+            lead_type=row.lead_type,
+            category=org.business_category if org else None,
+            location=location,
+            province=org.province if org else None,
+            source=source.name if source else "Source record",
+            source_url=evidence.source_url if evidence else "https://data.etenders.gov.za/",
+            status=row.status,
+            score=row.score,
+            evidence_note=row.qualification_reason or "Source evidence attached.",
+            demo=False,
+        ))
+    categories = session.scalars(
+        select(Organization.business_category).join(
+            LeadRow, LeadRow.organization_id == Organization.id
+        ).where(
+            LeadRow.tenant_id == DEFAULT_TENANT_ID,
+            Organization.business_category.is_not(None),
+            Organization.business_category != "",
+        ).distinct().order_by(Organization.business_category)
+    ).all()
+    return LeadPage(items=items, categories=list(categories), page=page, page_size=page_size, total=total)
+
+
+@app.get("/api/v1/leads/categories", response_model=list[str])
+def lead_categories(session: Session = Depends(get_session)):
+    return session.scalars(
+        select(Organization.business_category).join(
+            LeadRow, LeadRow.organization_id == Organization.id
+        ).where(
+            LeadRow.tenant_id == DEFAULT_TENANT_ID,
+            Organization.business_category.is_not(None),
+            Organization.business_category != "",
+        ).distinct().order_by(Organization.business_category)
+    ).all()
+
 
 @app.post("/api/v1/leads", response_model=Lead, status_code=201)
 def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
@@ -171,8 +278,13 @@ def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
     normalized=" ".join(payload.organization.casefold().split())
     org=session.scalar(select(Organization).where(Organization.normalized_name==normalized,Organization.country_code=="ZA"))
     if org is None:
-        org=Organization(canonical_name=payload.organization.strip(),normalized_name=normalized,locality=payload.location)
+        org=Organization(canonical_name=payload.organization.strip(),normalized_name=normalized,locality=payload.location,business_category=payload.category)
         session.add(org); session.flush()
+    else:
+        if payload.category:
+            org.business_category=payload.category.strip()
+        if payload.location and payload.location != "South Africa":
+            org.locality=payload.location.strip()
     row=session.scalar(select(LeadRow).where(LeadRow.tenant_id==DEFAULT_TENANT_ID,LeadRow.campaign_id==campaign.id,LeadRow.organization_id==org.id))
     if row is None:
         row=LeadRow(tenant_id=DEFAULT_TENANT_ID,campaign_id=campaign.id,organization_id=org.id,lead_type=payload.lead_type,status=payload.status,score=payload.score,qualification_reason=payload.evidence_note)
