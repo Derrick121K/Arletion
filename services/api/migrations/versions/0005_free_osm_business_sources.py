@@ -13,14 +13,20 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("leads", sa.Column("verification_status", sa.String(32), nullable=False, server_default="unverified"))
-    op.add_column("leads", sa.Column("verification_source", sa.Text(), nullable=True))
-    op.add_column("leads", sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True))
-    op.create_check_constraint(
-        "lead_verification_status_check",
-        "leads",
-        "verification_status IN ('unverified','source_confirmed','officially_verified','needs_review')",
-    )
+    bind = op.get_bind()
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("leads")}
+    if "verification_status" not in columns:
+        op.add_column("leads", sa.Column("verification_status", sa.String(32), nullable=False, server_default="unverified"))
+    if "verification_source" not in columns:
+        op.add_column("leads", sa.Column("verification_source", sa.Text(), nullable=True))
+    if "verified_at" not in columns:
+        op.add_column("leads", sa.Column("verified_at", sa.DateTime(timezone=True), nullable=True))
+    checks = {item["name"] for item in sa.inspect(bind).get_check_constraints("leads")}
+    if "lead_verification_status_check" not in checks:
+        op.create_check_constraint(
+            "lead_verification_status_check", "leads",
+            "verification_status IN ('unverified','source_confirmed','officially_verified','needs_review')",
+        )
     op.execute("""
         INSERT INTO source_registry (
             id, name, base_url, source_type, licence_reference, permitted_use, enabled,
@@ -42,7 +48,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint("lead_verification_status_check", "leads", type_="check")
-    op.drop_column("leads", "verified_at")
-    op.drop_column("leads", "verification_source")
-    op.drop_column("leads", "verification_status")
+    bind = op.get_bind()
+    checks = {item["name"] for item in sa.inspect(bind).get_check_constraints("leads")}
+    if "lead_verification_status_check" in checks:
+        op.drop_constraint("lead_verification_status_check", "leads", type_="check")
+    columns = {column["name"] for column in sa.inspect(bind).get_columns("leads")}
+    for name in ("verified_at", "verification_source", "verification_status"):
+        if name in columns:
+            op.drop_column("leads", name)
