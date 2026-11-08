@@ -236,32 +236,55 @@ def summary(session: Session = Depends(get_session)):
       "qualified": session.scalar(select(func.count(LeadRow.id)).where(LeadRow.tenant_id == DEFAULT_TENANT_ID, LeadRow.score >= 70)) or 0,
       "demo_mode":False,"message":"Workspace records are stored in PostgreSQL."
     }
+def _campaign_item(row: CampaignRow, session: Session) -> Campaign:
+    geography = row.geography if isinstance(row.geography, str) else ", ".join(str(value) for value in row.geography.values() if value)
+    count_query = select(func.count(ConsumerEnquiryRow.id)).where(ConsumerEnquiryRow.campaign_id == row.id) if row.lead_type == "consumer_enquiry" else select(func.count(LeadRow.id)).where(LeadRow.campaign_id == row.id)
+    return Campaign(
+        id=str(row.id), name=row.name, objective=row.objective, lead_type=row.lead_type,
+        pipeline="consumer" if row.lead_type == "consumer_enquiry" else "business_procurement",
+        geography=geography or "South Africa", status=row.status, lead_count=session.scalar(count_query) or 0,
+    )
+
+
 @app.get("/api/v1/campaigns", response_model=list[Campaign])
-def get_campaigns(session: Session = Depends(get_session)):
-    rows=session.scalars(select(CampaignRow).where(CampaignRow.tenant_id==DEFAULT_TENANT_ID).order_by(CampaignRow.created_at.desc())).all()
-    result=[]
-    for row in rows:
-        geography=row.geography if isinstance(row.geography,str) else ", ".join(str(value) for value in row.geography.values() if value)
-        result.append(Campaign(id=str(row.id),name=row.name,objective=row.objective,lead_type=row.lead_type,geography=geography or "South Africa",status=row.status,lead_count=session.scalar(select(func.count(LeadRow.id)).where(LeadRow.campaign_id==row.id)) or 0))
-    return result
+def get_campaigns(
+    pipeline: Literal["business_procurement", "consumer"] | None = None,
+    session: Session = Depends(get_session),
+):
+    statement = select(CampaignRow).where(CampaignRow.tenant_id == DEFAULT_TENANT_ID)
+    if pipeline == "consumer":
+        statement = statement.where(CampaignRow.lead_type == "consumer_enquiry")
+    elif pipeline == "business_procurement":
+        statement = statement.where(CampaignRow.lead_type != "consumer_enquiry")
+    return [_campaign_item(row, session) for row in session.scalars(statement.order_by(CampaignRow.created_at.desc())).all()]
+
 
 @app.post("/api/v1/campaigns", response_model=Campaign, status_code=201)
 def create_campaign(payload: CampaignWrite, session: Session = Depends(get_session)):
-    row=CampaignRow(tenant_id=DEFAULT_TENANT_ID,name=payload.name,objective=payload.objective,lead_type=payload.lead_type,
-                    geography={"label":payload.geography},criteria=payload.criteria,status=payload.status)
-    session.add(row); session.commit(); session.refresh(row)
-    return Campaign(id=str(row.id),name=row.name,objective=row.objective,lead_type=row.lead_type,geography=payload.geography,status=row.status,lead_count=0)
+    row = CampaignRow(
+        tenant_id=DEFAULT_TENANT_ID, name=payload.name.strip(), objective=payload.objective.strip(),
+        lead_type=payload.lead_type, geography={"label": payload.geography},
+        criteria=payload.criteria, status=payload.status,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return _campaign_item(row, session)
+
 
 @app.patch("/api/v1/campaigns/{campaign_id}", response_model=Campaign)
 def update_campaign(campaign_id: UUID, payload: CampaignUpdate, session: Session = Depends(get_session)):
-    row=session.scalar(select(CampaignRow).where(CampaignRow.id==campaign_id,CampaignRow.tenant_id==DEFAULT_TENANT_ID))
-    if row is None: raise HTTPException(status_code=404,detail="Campaign not found.")
-    for key,value in payload.model_dump(exclude_unset=True).items():
+    row = session.scalar(select(CampaignRow).where(CampaignRow.id == campaign_id, CampaignRow.tenant_id == DEFAULT_TENANT_ID))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Campaign not found.")
+    for key, value in payload.model_dump(exclude_unset=True).items():
         if value is not None:
-            setattr(row,key,{"label":value} if key=="geography" else value)
-    session.commit(); session.refresh(row)
-    geography=row.geography if isinstance(row.geography,str) else ", ".join(str(value) for value in row.geography.values() if value)
-    return Campaign(id=str(row.id),name=row.name,objective=row.objective,lead_type=row.lead_type,geography=geography or "South Africa",status=row.status,lead_count=session.scalar(select(func.count(LeadRow.id)).where(LeadRow.campaign_id==row.id)) or 0)
+            setattr(row, key, {"label": value} if key == "geography" else value)
+    session.commit()
+    session.refresh(row)
+    return _campaign_item(row, session)
+
+
 @app.get("/api/v1/leads", response_model=list[Lead])
 def get_leads(q: str | None = Query(default=None, max_length=120), lead_type: str | None = None, session: Session = Depends(get_session)):
     statement=select(LeadRow).where(LeadRow.tenant_id==DEFAULT_TENANT_ID)
