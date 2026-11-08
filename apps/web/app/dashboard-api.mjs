@@ -94,3 +94,18 @@ export async function importOpenStreetMapBusinesses(apiBaseUrl, request, fetcher
   if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : `OpenStreetMap import failed with HTTP ${response.status}.`);
   return payload;
 }
+
+
+/** @param {string} apiBaseUrl @param {{campaign_id:string,max_releases:number}} request @param {typeof fetch} fetcher */
+export async function importEtenderAwardedSuppliers(apiBaseUrl, request, fetcher = fetch) {
+  const response = await fetcher(`${apiBaseUrl}/api/v1/leads/import/etender-awarded-suppliers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(60000),
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : `Treasury supplier import failed with HTTP ${response.status}.`);
+  return payload;
+}
