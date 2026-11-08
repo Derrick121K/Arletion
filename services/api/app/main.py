@@ -684,7 +684,6 @@ def import_openstreetmap_businesses(payload: OpenStreetMapImportWrite, session: 
     }
 
 
-@app.get("/api/v1/consumer-enquiries/status")
 def _tally_label(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
@@ -906,6 +905,7 @@ async def receive_tally_webhook(
     return {"accepted": True, "duplicate_event": False, "created": created, "category": category}
 
 
+@app.get("/api/v1/consumer-enquiries/status")
 def consumer_intake_status(session: Session = Depends(get_session)):
     public_campaigns = session.scalars(select(CampaignRow).where(
         CampaignRow.tenant_id == DEFAULT_TENANT_ID,
