@@ -107,10 +107,17 @@ class LeadWrite(BaseModel):
 
 class SourceWrite(BaseModel):
     name: str = Field(min_length=1, max_length=300)
-    url: str = Field(min_length=1, max_length=2000)
-    category: str = "Other"
+    url: str = Field(min_length=8, max_length=2000)
+    category: str = Field(default="Other", max_length=120)
     status: Literal["planned", "review_required", "enabled", "disabled"] = "review_required"
-    note: str = ""
+    note: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_source_url(self):
+        parsed = urlsplit(self.url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("url must be an absolute HTTP or HTTPS URL")
+        return self
 
 class OfficialImportWrite(BaseModel):
     page_number: int = Field(default=1, ge=1)
