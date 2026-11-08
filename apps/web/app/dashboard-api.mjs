@@ -109,3 +109,18 @@ export async function importEtenderAwardedSuppliers(apiBaseUrl, request, fetcher
   if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : `Treasury supplier import failed with HTTP ${response.status}.`);
   return payload;
 }
+
+
+/** @param {string} apiBaseUrl @param {{start_page:number,page_size:number,page_count:number,date_from:string,date_to:string}} request @param {typeof fetch} fetcher */
+export async function importOfficialOpportunityPages(apiBaseUrl, request, fetcher = fetch) {
+  const response = await fetcher(`${apiBaseUrl}/api/v1/opportunities/import/official/batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(85000),
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : `Treasury import failed with HTTP ${response.status}.`);
+  return payload;
+}
