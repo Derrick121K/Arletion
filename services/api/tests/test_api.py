@@ -192,7 +192,7 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         }).json()
         common = {
             "campaign_id": campaign["id"], "lead_type": "business",
-            "location": "eMalahleni", "source": "Approved test source",
+            "location": "eMalahleni", "province": "Mpumalanga", "municipality": "eMalahleni", "source": "Approved test source",
             "source_url": "https://source.example/records", "status": "new",
         }
         first = api_request("POST", "/api/v1/leads", json={
