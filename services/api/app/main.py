@@ -54,6 +54,7 @@ async def require_api_key_in_protected_deployments(request, call_next):
 class Campaign(BaseModel):
     id: str; name: str; objective: str
     lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"]
+    pipeline: Literal["business_procurement", "consumer"]
     geography: str; status: Literal["draft", "active", "paused", "archived"]; lead_count: int = 0
 class Lead(BaseModel):
     id: str; organization: str; lead_type: str; category: str | None = None; location: str
@@ -66,6 +67,60 @@ class LeadPage(BaseModel):
     page: int
     page_size: int
     total: int
+class ConsumerEnquiryWrite(BaseModel):
+    campaign_id: UUID
+    full_name: str = Field(min_length=2, max_length=160)
+    phone: str | None = Field(default=None, max_length=32)
+    email: str | None = Field(default=None, max_length=254)
+    province: str | None = Field(default=None, max_length=100)
+    locality: str | None = Field(default=None, max_length=120)
+    preferred_channel: Literal["phone", "email", "whatsapp"]
+    source: str = Field(default="website_form", min_length=2, max_length=120)
+    processing_consent: bool
+    marketing_consent: bool = False
+    notice_version: str = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_contact_and_permissions(self):
+        self.full_name = self.full_name.strip()
+        if not self.phone and not self.email:
+            raise ValueError("Provide a phone number or email address.")
+        if self.phone and not re.fullmatch(r"[+0-9() .-]{7,32}", self.phone.strip()):
+            raise ValueError("Provide a valid phone number.")
+        if self.email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", self.email.strip()):
+            raise ValueError("Provide a valid email address.")
+        if self.preferred_channel == "email" and not self.email:
+            raise ValueError("An email address is required for the selected contact channel.")
+        if self.preferred_channel in {"phone", "whatsapp"} and not self.phone:
+            raise ValueError("A phone number is required for the selected contact channel.")
+        if not self.processing_consent:
+            raise ValueError("Consent to process this enquiry is required.")
+        return self
+
+class ConsumerEnquiryItem(BaseModel):
+    id: str
+    campaign_id: str
+    contact_protected: bool = True
+    has_phone: bool
+    has_email: bool
+    province: str | None
+    locality: str | None
+    preferred_channel: str
+    source: str
+    status: str
+    processing_consent_at: datetime
+    marketing_consent: bool
+    marketing_consent_at: datetime | None
+    created_at: datetime
+    retention_expires_at: datetime
+
+class ConsumerEnquiryPage(BaseModel):
+    items: list[ConsumerEnquiryItem]
+    page: int
+    page_size: int
+    total: int
+
+
 class Source(BaseModel):
     id: str; name: str; category: str; url: str
     status: Literal["planned", "review_required", "enabled", "disabled"]; note: str
