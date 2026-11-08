@@ -692,6 +692,8 @@ def _tally_label(value: str) -> str:
 def _tally_value(fields: list[dict[str, Any]], labels: set[str]) -> Any:
     wanted = {_tally_label(label) for label in labels}
     for field in fields:
+        if not isinstance(field, dict):
+            continue
         if _tally_label(str(field.get("label") or "")) in wanted:
             value = field.get("value")
             options = field.get("options")
