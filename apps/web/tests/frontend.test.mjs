@@ -231,6 +231,50 @@ test("OpenStreetMap UI labels mapped records as source-confirmed, not CIPC verif
   assert.match(page, /recordManualVerification/);
 });
 
+test("free Treasury supplier import batches official releases before extracting awarded companies", async () => {
+  const calls = [];
+  const result = await importFreeAwardedSupplierLeads("http://127.0.0.1:8000", {
+    campaign_id: "campaign-1", start_page: 3, page_count: 2,
+    date_from: "2026-10-01", date_to: "2026-11-08", max_releases: 2000,
+  }, async (url, options) => {
+    calls.push({ url, body: options.body && JSON.parse(options.body) });
+    if (url.endsWith("/api/v1/opportunities/import/official/batch")) {
+      return { ok: true, json: async () => ({
+        source: "National Treasury eTender Transparency Portal", pages_imported: 2,
+        releases_received: 200, inserted: 180, updated: 0, unchanged: 0,
+        stale_releases: 0, duplicates_in_input: 0, skipped: 20, next_page: 5,
+        warning: null, has_more: true,
+      }) };
+    }
+    return { ok: true, json: async () => ({
+      source: "National Treasury eTender Transparency Portal", matched_releases: 200,
+      unique_awarded_companies: 12, inserted: 10, updated: 2,
+      skipped_releases_without_company_awards: 188,
+      verification_status: "source_confirmed",
+      verification_scope: "Named as a supplier in a published award; CSD status not implied.",
+    }) };
+  });
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].url, /opportunities\/import\/official\/batch$/);
+  assert.equal(calls[0].body.start_page, 3);
+  assert.equal(calls[0].body.page_count, 2);
+  assert.match(calls[1].url, /leads\/import\/etender-awarded-suppliers$/);
+  assert.equal(calls[1].body.campaign_id, "campaign-1");
+  assert.equal(calls[1].body.max_releases, 2000);
+  assert.equal(result.batch.next_page, 5);
+  assert.equal(result.suppliers.inserted, 10);
+  assert.equal(result.suppliers.verification_status, "source_confirmed");
+});
+
+test("business lead screen offers one-step free Treasury source import with honest verification scope", async () => {
+  const page = await read("app/page.tsx");
+  assert.match(page, /Get free real supplier leads/);
+  assert.match(page, /importFreeAwardedSupplierLeads/);
+  assert.match(page, /Approve Treasury source first/);
+  assert.match(page, /not current CSD-verified/);
+  assert.match(page, /No paid lead-provider account is required/);
+});
+
 test("dashboard data loader reports unavailable or failing API requests", async () => {
   await assert.rejects(
     loadDashboardData("http://127.0.0.1:8000", async () => { throw new Error("offline"); }),
