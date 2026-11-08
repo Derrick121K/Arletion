@@ -41,6 +41,8 @@ class ApiUnitTests(unittest.TestCase):
         }):
             denied = api_request("GET", "/api/v1/campaigns")
             self.assertEqual(denied.status_code, 401)
+            self.assertEqual(api_request("GET", "/api/v1/leads/search").status_code, 401)
+            self.assertEqual(api_request("GET", "/api/v1/leads/categories").status_code, 401)
             allowed = api_request("GET", "/api/v1/campaigns", headers={"Authorization": "Bearer test-secret-key"})
             # Correct authentication reaches the database dependency, which is intentionally absent in this unit test.
             self.assertEqual(allowed.status_code, 503)
@@ -118,6 +120,8 @@ class ApiUnitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_import("{}", "xml")
         self.assertIsNone(normalize_record({"title": "no stable ID"}))
+        unsafe_url = normalize_record({"ocid": "ocds-unsafe", "source_url": "javascript:alert(1)", "title": "Unsafe link"})
+        self.assertEqual(unsafe_url["source_url"], "https://data.etenders.gov.za/")
 
 
 class PostgreSQLIntegrationTests(unittest.TestCase):
