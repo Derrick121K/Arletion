@@ -306,10 +306,9 @@ def get_leads(q: str | None = Query(default=None, max_length=120), lead_type: st
 @app.get("/api/v1/leads/search", response_model=LeadPage)
 def search_leads(
     q: str | None = Query(default=None, max_length=120),
-    lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"] | None = None,
+    lead_type: Literal["business", "procurement", "partnership"] | None = None,
     category: str | None = Query(default=None, max_length=120),
     status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
-    category: Literal["debt_counselling", "debt_review_information", "budget_guidance", "general"] | None = None,
     province: str | None = Query(default=None, max_length=100),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
