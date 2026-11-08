@@ -94,12 +94,13 @@ export default function DebtReviewEnquiryPage() {
         </select>
       </label>
       <label style={check}><input type="checkbox" name="age_confirmed" required /> I confirm that I am 18 years or older.</label>
-      <label style={check}><input type="checkbox" name="processing_consent" required /> I consent to JMSE KAPA HOLDINGS / Arletion using these details only to respond to this enquiry, in line with its privacy notice.</label>
+      <label style={check}><input type="checkbox" name="processing_consent" required /> I consent to JMSE KAPA HOLDINGS / Arletion using these details only to respond to this enquiry. I have read the <a href="/privacy">Privacy Notice</a>.</label>
       <label style={check}><input type="checkbox" checked={marketing} onChange={event => setMarketing(event.target.checked)} /> I separately agree to receive future marketing messages. This is optional and can be withdrawn.</label>
       <label style={{ position: "absolute", left: "-10000px" }} aria-hidden="true">Website<input name="website" tabIndex={-1} autoComplete="off" /></label>
       <p className="sourcedesc">Do not enter your South African ID number, bank details, passwords, account numbers, creditor lists, salary or detailed financial history. We will not place you under debt review without your informed agreement. Your enquiry is not shared with a debt counsellor unless the appropriate process and permissions are in place.</p>
       <button className="btn" type="submit" disabled={busy}>{busy ? "Submitting…" : "Submit private enquiry"}</button>
       {message && <p role="status" className="sectiondesc">{message}</p>}
+      <a className="link" href="/privacy">Read the Arletion privacy notice</a>
       <a className="link" href="https://www.ncr.org.za/register_of_registrants/registered_dc.php" target="_blank" rel="noreferrer">Check the NCR registered debt counsellor directory ↗</a>
     </form>
     <p className="sourcedesc" style={{ marginTop: 18 }}>For an urgent complaint about a credit provider or debt counsellor, contact the National Credit Regulator through its official website. Arletion is not the NCR.</p>
