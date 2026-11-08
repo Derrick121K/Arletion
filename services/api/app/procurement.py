@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 from datetime import date, datetime, timezone
 from urllib.parse import urlsplit
 from typing import Any, Iterable
@@ -236,12 +237,13 @@ def import_opportunities(session: Session, records: Iterable[dict[str, Any]]) ->
     return {"inserted": inserted, "updated": updated, "unchanged": unchanged, "stale_releases": stale,
             "duplicates_in_input": duplicates, "skipped": skipped}
 
-_SA_COMPANY_FORMS = (
-    "PTY LTD", "PTY LIMITED", "LIMITED", " LTD", " (PTY)", " CC",
-    "CLOSE CORPORATION", "INCORPORATED", " INC", " SOC LTD", "NPC",
-    "NON PROFIT COMPANY", "CO-OPERATIVE", "COOPERATIVE",
+_SA_COMPANY_FORM = re.compile(
+    r"(?:\\b(?:PTY|PROPRIETARY)\\s+(?:LTD|LIMITED)\\b|\\(PTY\\)\\s*(?:LTD|LIMITED)\\b|"
+    r"\\bLIMITED\\b|\\bLTD\\.?\\b|\\bCLOSE CORPORATION\\b|\\bCC\\b|"
+    r"\\bINCORPORATED\\b|\\bINC\\.?\\b|\\bSOC\\s+LTD\\b|\\bNPC\\b|"
+    r"\\bNON-PROFIT COMPANY\\b|\\bCO-OPERATIVE\\b|\\bCOOPERATIVE\\b)$",
+    re.IGNORECASE,
 )
-
 
 def extract_awarded_business_suppliers(release: dict[str, Any], source_url: str, observed_at: datetime | None) -> list[dict[str, Any]]:
     """Extract only business-form supplier names from published OCDS awards."""
@@ -259,7 +261,7 @@ def extract_awarded_business_suppliers(release: dict[str, Any], source_url: str,
             if not isinstance(supplier, dict):
                 continue
             name = " ".join(str(supplier.get("name") or "").split())
-            if not name or not any(form in name.upper() for form in _SA_COMPANY_FORMS):
+            if not name or not _SA_COMPANY_FORM.search(name.rstrip(" .")):
                 continue
             identifier = supplier.get("id")
             if isinstance(identifier, dict):
