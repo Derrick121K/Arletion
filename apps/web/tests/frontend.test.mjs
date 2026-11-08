@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
-import { createCampaign, importFreeAwardedSupplierLeads, importOpenStreetMapBusinesses, loadConsumerPage, loadConsumerStatus, loadDashboardData, loadLeadPage } from "../app/dashboard-api.mjs";
+import { createCampaign, importFreeAwardedSupplierLeads, importNCRDebtCounsellors, importOpenStreetMapBusinesses, loadConsumerPage, loadConsumerStatus, loadDashboardData, loadLeadPage } from "../app/dashboard-api.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const monorepoRoot = resolve(webRoot, "../..");
@@ -296,4 +296,60 @@ test("dashboard API requests have bounded timeouts", async () => {
     }, 5),
     /timed out after 5ms/,
   );
+});
+
+
+test("public debt-review enquiry page keeps processing and marketing consent separate", async () => {
+  const page = await read("app/enquire/page.tsx");
+  assert.match(page, /I am considering debt review/);
+  assert.match(page, /I am already under debt review/);
+  assert.match(page, /I have applied and am waiting for feedback/);
+  assert.match(page, /processing_consent/);
+  assert.match(page, /marketing_consent/);
+  assert.match(page, /I confirm that I am 18 years or older/);
+  assert.match(page, /Do not enter your South African ID number/);
+  assert.match(page, /api\/public\/enquiries/);
+  assert.doesNotMatch(page, /creditor lists/gi, /x/);
+});
+
+test("NCR directory import posts selected keyword and partnership campaign", async () => {
+  let request;
+  const result = await importNCRDebtCounsellors("https://api.example", {
+    campaign_id: "partner-campaign", keyword: "eMalahleni", page: 2, limit: 100,
+  }, async (url, options) => {
+    request = { url, options };
+    return { ok: true, json: async () => ({
+      source: "National Credit Regulator Registered Debt Counsellors",
+      keyword: "eMalahleni", page: 2, matched: 3, inserted: 3, updated: 0,
+      verification_status: "source_confirmed", note: "No contact details stored.",
+    }) };
+  });
+  assert.ok(request.url.endsWith("/api/v1/leads/import/ncr-debt-counsellors"));
+  assert.equal(request.options.method, "POST");
+  assert.deepEqual(JSON.parse(request.options.body), {
+    campaign_id: "partner-campaign", keyword: "eMalahleni", page: 2, limit: 100,
+  });
+  assert.equal(result.inserted, 3);
+  assert.equal(result.verification_status, "source_confirmed");
+});
+
+test("NCR partner import is shown separately from consumer debt-review leads", async () => {
+  const page = await read("app/page.tsx");
+  assert.match(page, /Find registered debt-counsellor partners/);
+  assert.match(page, /National Credit Regulator Registered Debt Counsellors/);
+  assert.match(page, /These are not consumer debt-review leads/);
+  assert.match(page, /importNCRDebtCounsellors/);
+  assert.match(page, /public_intake/);
+  assert.match(page, /Publish a public voluntary debt-review enquiry form/);
+});
+
+test("public enquiry form and API routes are excluded from private workspace Basic Auth", async () => {
+  const proxy = await read("proxy.ts");
+  assert.match(proxy, /enquire/);
+  assert.match(proxy, /api\/public\/enquiries/);
+  const route = await read("app/api/public/enquiries/route.ts");
+  assert.match(route, /ARLETION_API_KEY/);
+  assert.match(route, /ARLETION_API_BASE_URL/);
+  assert.match(route, /request\.nextUrl\.origin/);
+  assert.match(route, /Too many submissions/);
 });
