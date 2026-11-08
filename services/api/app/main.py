@@ -89,6 +89,8 @@ class LeadWrite(BaseModel):
     lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"]
     category: str | None = Field(default=None, max_length=120)
     location: str = Field(default="South Africa", max_length=180)
+    province: str | None = Field(default=None, max_length=100)
+    municipality: str | None = Field(default=None, max_length=120)
     source: str = Field(min_length=1, max_length=300)
     source_url: str = Field(min_length=8, max_length=2000)
     status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] = "new"
@@ -278,13 +280,17 @@ def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
     normalized=" ".join(payload.organization.casefold().split())
     org=session.scalar(select(Organization).where(Organization.normalized_name==normalized,Organization.country_code=="ZA"))
     if org is None:
-        org=Organization(canonical_name=payload.organization.strip(),normalized_name=normalized,locality=payload.location,business_category=payload.category)
+        org=Organization(canonical_name=payload.organization.strip(),normalized_name=normalized,locality=payload.location,province=payload.province,municipality=payload.municipality,business_category=payload.category)
         session.add(org); session.flush()
     else:
         if payload.category:
             org.business_category=payload.category.strip()
         if payload.location and payload.location != "South Africa":
             org.locality=payload.location.strip()
+        if payload.province:
+            org.province=payload.province.strip()
+        if payload.municipality:
+            org.municipality=payload.municipality.strip()
     row=session.scalar(select(LeadRow).where(LeadRow.tenant_id==DEFAULT_TENANT_ID,LeadRow.campaign_id==campaign.id,LeadRow.organization_id==org.id))
     if row is None:
         row=LeadRow(tenant_id=DEFAULT_TENANT_ID,campaign_id=campaign.id,organization_id=org.id,lead_type=payload.lead_type,status=payload.status,score=payload.score,qualification_reason=payload.evidence_note)
