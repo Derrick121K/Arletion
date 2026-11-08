@@ -304,8 +304,9 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         with self.engine.begin() as connection:
             connection.execute(text("""
                 INSERT INTO source_records (
-                    source_id, external_id, record_type, source_url, raw_payload
+                    id, source_id, external_id, record_type, source_url, raw_payload
                 ) VALUES (
+                    '00000000-0000-0000-0000-000000000099',
                     '00000000-0000-0000-0000-000000000002',
                     'ocds-9t57fa-awarded-supplier#release-award-1',
                     'ocds_release',
