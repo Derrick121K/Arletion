@@ -538,11 +538,18 @@ def withdraw_consumer_marketing(
     for record in records:
         record.consent_status = "withdrawn"
         record.withdrawn_at = now
-    session.add(SuppressionRecord(
-        tenant_id=DEFAULT_TENANT_ID, subject_reference=row.contact_fingerprint,
-        channel=row.preferred_channel, reason="Consumer withdrew electronic marketing consent",
-        status="active",
+    suppression = session.scalar(select(SuppressionRecord).where(
+        SuppressionRecord.tenant_id == DEFAULT_TENANT_ID,
+        SuppressionRecord.subject_reference == row.contact_fingerprint,
+        SuppressionRecord.channel == row.preferred_channel,
+        SuppressionRecord.status == "active",
     ))
+    if suppression is None:
+        session.add(SuppressionRecord(
+            tenant_id=DEFAULT_TENANT_ID, subject_reference=row.contact_fingerprint,
+            channel=row.preferred_channel, reason="Consumer withdrew electronic marketing consent",
+            status="active",
+        ))
     session.commit()
     return {"id": str(row.id), "marketing_consent": False, "suppressed": True}
 
@@ -550,7 +557,10 @@ def withdraw_consumer_marketing(
 @app.post("/api/v1/leads", response_model=Lead, status_code=201)
 def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
     campaign=session.scalar(select(CampaignRow).where(CampaignRow.id==payload.campaign_id,CampaignRow.tenant_id==DEFAULT_TENANT_ID))
-    if campaign is None: raise HTTPException(status_code=404,detail="Campaign not found in this workspace.")
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found in this workspace.")
+    if campaign.lead_type == "consumer_enquiry" or campaign.lead_type != payload.lead_type:
+        raise HTTPException(status_code=409, detail="Business leads must use a matching business/procurement campaign.")
     normalized=" ".join(payload.organization.casefold().split())
     org=session.scalar(select(Organization).where(Organization.normalized_name==normalized,Organization.country_code=="ZA"))
     if org is None:
