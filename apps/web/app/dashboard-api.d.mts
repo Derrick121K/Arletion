@@ -136,3 +136,19 @@ export function importOpenStreetMapBusinesses(
   request: { campaign_id: string; category: string; locality: string; province: string; latitude: number; longitude: number; radius_m: number; limit: number },
   fetcher?: typeof fetch,
 ): Promise<OpenStreetMapImportResult>;
+
+export interface AwardedSupplierImportResult {
+  source: string;
+  matched_releases: number;
+  unique_awarded_companies: number;
+  inserted: number;
+  updated: number;
+  skipped_releases_without_company_awards: number;
+  verification_status: "source_confirmed";
+  verification_scope: string;
+}
+export function importEtenderAwardedSuppliers(
+  apiBaseUrl: string,
+  request: { campaign_id: string; max_releases: number },
+  fetcher?: typeof fetch,
+): Promise<AwardedSupplierImportResult>;
