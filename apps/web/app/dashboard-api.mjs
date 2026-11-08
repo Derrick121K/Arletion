@@ -1,31 +1,55 @@
 const endpoints = ["campaigns", "sources", "summary", "opportunities"];
+const MAX_429_RETRIES = 3;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function retryAfterMs(response, attempt) {
+  const value = response.headers?.get?.("retry-after");
+  if (value) {
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 5000);
+    const date = Date.parse(value);
+    if (Number.isFinite(date)) return Math.min(Math.max(0, date - Date.now()), 5000);
+  }
+  return Math.min(250 * (2 ** attempt) + Math.floor(Math.random() * 100), 2500);
+}
+
+async function requestDashboardJson(url, endpoint, fetcher, timeoutMs) {
+  for (let attempt = 0; ; attempt += 1) {
+    const controller = new AbortController();
+    let timer;
+    let response;
+    try {
+      response = await Promise.race([
+        fetcher(url, { signal: controller.signal, cache: "no-store" }),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`API request for ${endpoint} timed out after ${timeoutMs}ms.`));
+            controller.abort();
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (response.status === 429 && attempt < MAX_429_RETRIES) {
+      await sleep(retryAfterMs(response, attempt));
+      continue;
+    }
+    if (!response.ok) {
+      throw new Error(`API request for ${endpoint} failed with HTTP ${response.status}.`);
+    }
+    return response.json();
+  }
+}
 
 /** @param {string} apiBaseUrl @param {typeof fetch} fetcher @param {number} timeoutMs */
 export async function loadDashboardData(apiBaseUrl, fetcher = fetch, timeoutMs = 90000) {
-  const values = await Promise.all(
-    endpoints.map(async (endpoint) => {
-      const controller = new AbortController();
-      let timer;
-      let response;
-      try {
-        response = await Promise.race([
-          fetcher(`${apiBaseUrl}/api/v1/${endpoint}`, { signal: controller.signal }),
-          new Promise((_, reject) => {
-            timer = setTimeout(() => {
-              reject(new Error(`API request for ${endpoint} timed out after ${timeoutMs}ms.`));
-              controller.abort();
-            }, timeoutMs);
-          }),
-        ]);
-      } finally {
-        clearTimeout(timer);
-      }
-      if (!response.ok) {
-        throw new Error(`API request for ${endpoint} failed with HTTP ${response.status}.`);
-      }
-      return response.json();
-    }),
-  );
+  // Serialize startup reads to avoid bursting four requests into a rate-limited service.
+  const values = [];
+  for (const endpoint of endpoints) {
+    values.push(await requestDashboardJson(`${apiBaseUrl}/api/v1/${endpoint}`, endpoint, fetcher, timeoutMs));
+  }
 
   return {
     campaigns: values[0],
