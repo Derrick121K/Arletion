@@ -152,3 +152,23 @@ export function importEtenderAwardedSuppliers(
   request: { campaign_id: string; max_releases: number },
   fetcher?: typeof fetch,
 ): Promise<AwardedSupplierImportResult>;
+
+export interface OfficialBatchImportResult {
+  source: string;
+  inserted: number;
+  updated: number;
+  unchanged: number;
+  stale_releases: number;
+  duplicates_in_input: number;
+  skipped: number;
+  pages_imported: number;
+  releases_received: number;
+  next_page: number;
+  warning: string | null;
+  has_more: boolean;
+}
+export function importOfficialOpportunityPages(
+  apiBaseUrl: string,
+  request: { start_page: number; page_size: number; page_count: number; date_from: string; date_to: string },
+  fetcher?: typeof fetch,
+): Promise<OfficialBatchImportResult>;
