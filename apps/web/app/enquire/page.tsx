@@ -24,7 +24,8 @@ export default function DebtReviewEnquiryPage() {
     event.preventDefault();
     setBusy(true);
     setMessage("");
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const body = {
       full_name: String(form.get("full_name") || ""),
       phone: String(form.get("phone") || "") || null,
@@ -46,7 +47,7 @@ export default function DebtReviewEnquiryPage() {
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "Your enquiry could not be submitted.");
-      event.currentTarget.reset();
+      formElement.reset();
       setMarketing(false);
       setMessage("Your enquiry has been received. A response is not a guarantee of debt-review approval or removal.");
     } catch (error) {
