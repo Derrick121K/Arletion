@@ -70,6 +70,10 @@ class ApiUnitTests(unittest.TestCase):
             self.assertEqual(api_request("GET", "/api/v1/leads/search").status_code, 401)
             self.assertEqual(api_request("GET", "/api/v1/leads/categories").status_code, 401)
             self.assertEqual(api_request("GET", "/api/v1/consumer-enquiries").status_code, 401)
+            # The Tally route is exempt from the internal bearer key because it enforces its own HMAC signature.
+            tally_without_database = api_request("POST", "/api/v1/webhooks/tally", json={})
+            self.assertEqual(tally_without_database.status_code, 503)
+            self.assertNotEqual(tally_without_database.status_code, 401)
             allowed = api_request("GET", "/api/v1/campaigns", headers={"Authorization": "Bearer test-secret-key"})
             # Correct authentication reaches the database dependency, which is intentionally absent in this unit test.
             self.assertEqual(allowed.status_code, 503)
