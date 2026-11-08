@@ -13,7 +13,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 from .database import DEFAULT_TENANT_ID, ETENDERS_SOURCE_ID, db_health, get_session
-from .models import Campaign as CampaignRow, ConsentRecord, ConsumerEnquiry as ConsumerEnquiryRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry, SuppressionRecord
+from .models import AuditEvent, Campaign as CampaignRow, ConsentRecord, ConsumerEnquiry as ConsumerEnquiryRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry, SuppressionRecord
 from .privacy import consumer_storage_ready, contact_fingerprint, decrypt_contact, encrypt_contact, valid_consumer_access
 from .procurement import extract_awarded_business_suppliers, import_opportunities, parse_import
 from .business_sources import OSM_ATTRIBUTION, OSM_SOURCE, fetch_osm_businesses
@@ -189,6 +189,31 @@ class OpenStreetMapImportWrite(BaseModel):
 class EtenderAwardSupplierImportWrite(BaseModel):
     campaign_id: UUID
     max_releases: int = Field(default=500, ge=1, le=2000)
+
+
+class LeadVerificationWrite(BaseModel):
+    registry: Literal["CSD", "CIPC"]
+    result: Literal["verified", "not_found", "inactive", "restricted", "unknown"]
+    evidence_url: str = Field(min_length=12, max_length=2000)
+    reference: str = Field(min_length=2, max_length=160)
+    note: str = Field(default="", max_length=1000)
+    checked_at: datetime
+
+    @model_validator(mode="after")
+    def validate_official_evidence(self):
+        parsed = urlsplit(self.evidence_url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        allowed = (
+            {"secure.csd.gov.za"} if self.registry == "CSD"
+            else {"cipc.co.za", "www.cipc.co.za", "eservices.cipc.co.za", "bizportal.gov.za"}
+        )
+        if parsed.scheme != "https" or host not in allowed or parsed.username or parsed.password:
+            raise ValueError("Evidence URL must be an HTTPS page on the selected official CSD/CIPC domain.")
+        if self.checked_at.tzinfo is None:
+            raise ValueError("checked_at must include a timezone.")
+        if self.checked_at > datetime.now(timezone.utc):
+            raise ValueError("checked_at cannot be in the future.")
+        return self
 
 
 class SourceWrite(BaseModel):
@@ -437,6 +462,48 @@ def lead_categories(session: Session = Depends(get_session)):
             Organization.business_category != "",
         ).distinct().order_by(Organization.business_category)
     ).all()
+
+
+@app.post("/api/v1/leads/{lead_id}/verification")
+def record_lead_verification(
+    lead_id: UUID,
+    payload: LeadVerificationWrite,
+    session: Session = Depends(get_session),
+):
+    lead = session.scalar(select(LeadRow).where(
+        LeadRow.id == lead_id,
+        LeadRow.tenant_id == DEFAULT_TENANT_ID,
+        LeadRow.lead_type != "consumer_enquiry",
+    ))
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Business lead not found.")
+    lead.verification_status = "officially_verified" if payload.result == "verified" else "needs_review"
+    lead.verification_source = f"{payload.registry} manual registry check"
+    lead.verified_at = payload.checked_at
+    previous = lead.qualification_reason or ""
+    note = f"{payload.registry} check: {payload.result}; reference {payload.reference}; checked {payload.checked_at.isoformat()}. {payload.note}".strip()
+    lead.qualification_reason = (previous + " " + note).strip()[:2000]
+    session.add(AuditEvent(
+        tenant_id=DEFAULT_TENANT_ID,
+        actor_user_id=os.getenv("ARLETION_OPERATOR_ID", "workspace_operator"),
+        action="lead.registry_verification.recorded",
+        entity_type="lead",
+        entity_id=str(lead.id),
+        metadata_json={
+            "registry": payload.registry, "result": payload.result,
+            "evidence_url": payload.evidence_url, "reference": payload.reference,
+            "checked_at": payload.checked_at.isoformat(), "note": payload.note,
+        },
+    ))
+    session.commit()
+    return {
+        "lead_id": str(lead.id),
+        "verification_status": lead.verification_status,
+        "verification_source": lead.verification_source,
+        "verified_at": lead.verified_at,
+        "evidence_url": payload.evidence_url,
+        "reference": payload.reference,
+    }
 
 
 @app.post("/api/v1/leads/import/openstreetmap")
