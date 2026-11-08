@@ -141,8 +141,9 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         with self.engine.begin() as connection:
             # Keep migration-seeded reference rows; clear tenant-owned/test data.
             connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, consumer_enquiries, leads, opportunities, source_records, campaigns, organizations RESTART IDENTITY CASCADE"))
-            connection.execute(text("DELETE FROM source_registry WHERE id <> '00000000-0000-0000-0000-000000000002'"))
+            connection.execute(text("DELETE FROM source_registry WHERE id NOT IN ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003')"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL WHERE id = '00000000-0000-0000-0000-000000000002'"))
+            connection.execute(text("UPDATE source_registry SET permitted_use = 'approved', enabled = TRUE, last_error = NULL, last_synced_at = NULL WHERE id = '00000000-0000-0000-0000-000000000003'"))
 
     def test_source_can_be_explicitly_approved_after_manual_review(self):
         response = api_request(
