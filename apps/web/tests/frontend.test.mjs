@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
-import { createCampaign, importOpenStreetMapBusinesses, loadConsumerPage, loadConsumerStatus, loadDashboardData, loadLeadPage } from "../app/dashboard-api.mjs";
+import { createCampaign, importFreeAwardedSupplierLeads, importOpenStreetMapBusinesses, loadConsumerPage, loadConsumerStatus, loadDashboardData, loadLeadPage } from "../app/dashboard-api.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const monorepoRoot = resolve(webRoot, "../..");
