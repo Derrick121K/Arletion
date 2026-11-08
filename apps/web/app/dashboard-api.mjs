@@ -124,3 +124,18 @@ export async function importOfficialOpportunityPages(apiBaseUrl, request, fetche
   if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : `Treasury import failed with HTTP ${response.status}.`);
   return payload;
 }
+
+
+/** @param {string} apiBaseUrl @param {string} leadId @param {{registry:"CSD"|"CIPC",result:"verified"|"not_found"|"inactive"|"restricted"|"unknown",evidence_url:string,reference:string,note?:string,checked_at:string}} payload @param {typeof fetch} fetcher */
+export async function recordLeadVerification(apiBaseUrl, leadId, payload, fetcher = fetch) {
+  const response = await fetcher(`${apiBaseUrl}/api/v1/leads/${encodeURIComponent(leadId)}/verification`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(20000),
+    cache: "no-store",
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : `Verification record failed with HTTP ${response.status}.`);
+  return result;
+}
