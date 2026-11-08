@@ -1,4 +1,5 @@
 from datetime import date, datetime, timezone
+import base64
 import hashlib
 import hmac
 import json
@@ -820,7 +821,7 @@ async def receive_tally_webhook(
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="Tally webhook payload must be a JSON object.")
     canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    expected = __import__("base64").b64encode(
+    expected = base64.b64encode(
         hmac.new(secret.encode("utf-8"), canonical, hashlib.sha256).digest()
     ).decode("ascii")
     if not hmac.compare_digest(expected, tally_signature.strip()):
