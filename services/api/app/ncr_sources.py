@@ -27,7 +27,7 @@ def parse_registered_counsellors(document: str, page_url: str) -> list[dict[str,
     pattern = re.compile(
         r"Full Name\s*:\s*(.*?)\s+Trading Name\s*:\s*(.*?)\s+"
         r"Phone\s*:\s*(.*?)\s+Fax\s*:\s*(.*?)\s+Email Address\s*:\s*(.*?)\s+"
-        r"Final Registration Date\s*:\s*(.*?)\s+NCR Registration No\.?\s*:\s*(.*?)\s+"
+        r"Final Registration Date\s*:\s*(.*?)\s+NCR Registration No\.?\s*:?\s*(.*?)\s+"
         r"Physical Address\s*:\s*(.*?)\s+Postal Address\s*:\s*(.*?)\s+"
         r"Town\s*:\s*(.*?)\s+Registered!",
         re.IGNORECASE,
