@@ -199,10 +199,38 @@ def health():
 @app.get("/live")
 def live():
     return {"status":"ok", "service":"arletion-api", "timestamp":datetime.now(timezone.utc).isoformat()}
+def _consumer_ready() -> None:
+    if not consumer_storage_ready():
+        raise HTTPException(503, "Consumer intake is disabled until durable storage, encryption, retention and access controls are configured.")
+    try:
+        encrypt_contact("configuration-check")
+        contact_fingerprint("configuration-check", None)
+    except RuntimeError as error:
+        raise HTTPException(503, str(error)) from error
+
+
+def _consumer_access(supplied: str | None) -> None:
+    if not valid_consumer_access(supplied):
+        raise HTTPException(403, "A separate consumer-contact access credential is required.")
+
+
+def _consumer_item(row: ConsumerEnquiryRow) -> ConsumerEnquiryItem:
+    return ConsumerEnquiryItem(
+        id=str(row.id), campaign_id=str(row.campaign_id),
+        has_phone=bool(row.phone_ciphertext), has_email=bool(row.email_ciphertext),
+        province=row.province, locality=row.locality, preferred_channel=row.preferred_channel,
+        source=row.source, status=row.status, processing_consent_at=row.processing_consent_at,
+        marketing_consent=row.marketing_consent, marketing_consent_at=row.marketing_consent_at,
+        created_at=row.created_at, retention_expires_at=row.retention_expires_at,
+    )
+
+
 @app.get("/api/v1/summary")
 def summary(session: Session = Depends(get_session)):
     return {
       "campaigns": session.scalar(select(func.count(CampaignRow.id)).where(CampaignRow.tenant_id == DEFAULT_TENANT_ID)) or 0,
+      "business_leads": session.scalar(select(func.count(LeadRow.id)).where(LeadRow.tenant_id == DEFAULT_TENANT_ID, LeadRow.lead_type != "consumer_enquiry")) or 0,
+      "consumer_enquiries": session.scalar(select(func.count(ConsumerEnquiryRow.id)).where(ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID)) or 0,
       "leads": session.scalar(select(func.count(LeadRow.id)).where(LeadRow.tenant_id == DEFAULT_TENANT_ID)) or 0,
       "sources": session.scalar(select(func.count(SourceRegistry.id)) ) or 0,
       "qualified": session.scalar(select(func.count(LeadRow.id)).where(LeadRow.tenant_id == DEFAULT_TENANT_ID, LeadRow.score >= 70)) or 0,
