@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -344,6 +345,101 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertEqual(api_request("GET", "/api/v1/leads/search", params={
             "lead_type": "procurement", "verification_status": "source_confirmed",
         }).json()["total"], 1)
+
+    def test_manual_csd_cipc_verification_requires_official_evidence_and_is_audited(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Supplier verification", "objective": "Review official supplier status",
+            "lead_type": "business",
+        }).json()
+        created = api_request("POST", "/api/v1/leads", json={
+            "campaign_id": campaign["id"], "organization": "Verification Test Supplies (Pty) Ltd",
+            "lead_type": "business", "category": "Construction", "source": "Test source",
+            "source_url": "https://source.example/record",
+        })
+        self.assertEqual(created.status_code, 201, created.text)
+        lead_id = created.json()["id"]
+        bad_host = api_request("POST", f"/api/v1/leads/{lead_id}/verification", json={
+            "registry": "CSD", "result": "verified",
+            "evidence_url": "https://example.com/fake-csd-record",
+            "reference": "SUP-12345", "checked_at": "2026-11-08T13:00:00+02:00",
+        })
+        self.assertEqual(bad_host.status_code, 422)
+
+        verified = api_request("POST", f"/api/v1/leads/{lead_id}/verification", json={
+            "registry": "CSD", "result": "verified",
+            "evidence_url": "https://secure.csd.gov.za/supplier/verified-record",
+            "reference": "MAAA1234567", "note": "Supplier status checked manually by operator.",
+            "checked_at": "2026-11-08T13:00:00+02:00",
+        })
+        self.assertEqual(verified.status_code, 200, verified.text)
+        self.assertEqual(verified.json()["verification_status"], "officially_verified")
+        self.assertEqual(verified.json()["verification_source"], "CSD manual registry check")
+
+        result = api_request("GET", "/api/v1/leads/search", params={
+            "verification_status": "officially_verified",
+        })
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["total"], 1)
+        self.assertEqual(result.json()["items"][0]["verification_source"], "CSD manual registry check")
+
+        with self.engine.connect() as connection:
+            event = connection.execute(text(
+                "SELECT action, metadata FROM audit_events WHERE entity_id = :lead_id"
+            ), {"lead_id": lead_id}).one()
+        self.assertEqual(event.action, "lead.registry_verification.recorded")
+        self.assertEqual(event.metadata["registry"], "CSD")
+        self.assertEqual(event.metadata["reference"], "MAAA1234567")
+
+
+    def test_official_batch_import_fetches_sequential_pages_and_returns_resume_cursor(self):
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_registry SET permitted_use='approved', enabled=TRUE "
+                "WHERE id='00000000-0000-0000-0000-000000000002'"
+            ))
+        releases = [
+            {"ocid": "ocds-9t57fa-batch-1", "id": "release-1", "date": "2026-10-25T10:00:00Z",
+             "tender": {"title": "Road maintenance 1", "status": "active"}},
+            {"ocid": "ocds-9t57fa-batch-2", "id": "release-2", "date": "2026-10-26T10:00:00Z",
+             "tender": {"title": "Road maintenance 2", "status": "active"}},
+        ]
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self, limit):
+                return __import__("json").dumps({"releases": [self.payload]}).encode()
+
+        calls = []
+        def fake_urlopen(request, timeout):
+            calls.append(request.full_url)
+            return FakeResponse(releases[len(calls) - 1])
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            response = api_request("POST", "/api/v1/opportunities/import/official/batch", json={
+                "start_page": 7, "page_size": 1, "page_count": 2,
+                "date_from": "2026-10-01", "date_to": "2026-11-08",
+            })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("PageNumber=7", calls[0])
+        self.assertIn("PageNumber=8", calls[1])
+        self.assertEqual(response.json()["pages_imported"], 2)
+        self.assertEqual(response.json()["releases_received"], 2)
+        self.assertEqual(response.json()["inserted"], 2)
+        self.assertEqual(response.json()["next_page"], 9)
+        self.assertTrue(response.json()["has_more"])
+
+        invalid = api_request("POST", "/api/v1/opportunities/import/official/batch", json={
+            "start_page": 1, "page_size": 100, "page_count": 5,
+            "date_from": "2026-10-01", "date_to": "2026-11-08",
+        })
+        self.assertEqual(invalid.status_code, 422)
+
 
     def test_openstreetmap_query_is_category_scoped_and_bounded(self):
         query = overpass_query("Construction", -25.8762, 29.21, 10000, 100)
