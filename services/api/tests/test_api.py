@@ -5,6 +5,7 @@ from unittest.mock import patch
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.testclient import TestClient
 from sqlalchemy import text
+from cryptography.fernet import Fernet
 
 from app.database import engine_for_url, normalize_database_url
 from app.main import app
@@ -43,6 +44,7 @@ class ApiUnitTests(unittest.TestCase):
             self.assertEqual(denied.status_code, 401)
             self.assertEqual(api_request("GET", "/api/v1/leads/search").status_code, 401)
             self.assertEqual(api_request("GET", "/api/v1/leads/categories").status_code, 401)
+            self.assertEqual(api_request("GET", "/api/v1/consumer-enquiries").status_code, 401)
             allowed = api_request("GET", "/api/v1/campaigns", headers={"Authorization": "Bearer test-secret-key"})
             # Correct authentication reaches the database dependency, which is intentionally absent in this unit test.
             self.assertEqual(allowed.status_code, 503)
@@ -137,7 +139,7 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
     def setUp(self):
         with self.engine.begin() as connection:
             # Keep migration-seeded reference rows; clear tenant-owned/test data.
-            connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, leads, opportunities, source_records, campaigns, organizations RESTART IDENTITY CASCADE"))
+            connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, consumer_enquiries, leads, opportunities, source_records, campaigns, organizations RESTART IDENTITY CASCADE"))
             connection.execute(text("DELETE FROM source_registry WHERE id <> '00000000-0000-0000-0000-000000000002'"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL WHERE id = '00000000-0000-0000-0000-000000000002'"))
 
@@ -252,6 +254,142 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             "source_url": "https://source.example/1", "status": "hacked",
         })
         self.assertEqual(invalid_status.status_code, 422)
+
+    def test_consumer_intake_is_disabled_until_storage_and_encryption_are_approved(self):
+        with patch.dict(os.environ, {
+            "ARLETION_CONSUMER_INTAKE_ENABLED": "false",
+            "ARLETION_CONSUMER_STORAGE_APPROVED": "false",
+            "ARLETION_CONSUMER_RBAC_APPROVED": "false",
+            "ARLETION_PII_ENCRYPTION_KEY": "",
+            "ARLETION_CONTACT_HASH_KEY": "",
+            "ARLETION_CONSUMER_ACCESS_KEY": "",
+        }):
+            status = api_request("GET", "/api/v1/consumer-enquiries/status")
+            listing = api_request("GET", "/api/v1/consumer-enquiries")
+        self.assertEqual(status.status_code, 200)
+        self.assertFalse(status.json()["enabled"])
+        self.assertFalse(status.json()["public_form"])
+        self.assertEqual(listing.status_code, 503)
+        self.assertIn("disabled", listing.json()["detail"].lower())
+
+    def test_consumer_enquiries_use_separate_encrypted_records_and_separate_marketing_consent(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Debt counselling enquiries", "objective": "Respond to voluntary requests",
+            "lead_type": "consumer_enquiry", "status": "active",
+        })
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        self.assertEqual(campaign.json()["pipeline"], "consumer")
+        wrong_pipeline = api_request("POST", "/api/v1/leads", json={
+            "campaign_id": campaign.json()["id"], "organization": "Consumer Pipeline Leakage",
+            "lead_type": "business", "source": "Test source",
+            "source_url": "https://source.example/consumer-campaign",
+        })
+        self.assertEqual(wrong_pipeline.status_code, 409)
+        settings = {
+            "ARLETION_CONSUMER_INTAKE_ENABLED": "true",
+            "ARLETION_CONSUMER_STORAGE_APPROVED": "true",
+            "ARLETION_CONSUMER_RBAC_APPROVED": "true",
+            "ARLETION_PII_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+            "ARLETION_CONTACT_HASH_KEY": "test-contact-hash-key-that-is-at-least-32-bytes",
+            "ARLETION_CONSUMER_ACCESS_KEY": "separate-consumer-contact-secret",
+            "ARLETION_CONSUMER_RETENTION_DAYS": "90",
+        }
+        body = {
+            "campaign_id": campaign.json()["id"], "full_name": "Mpho Testperson",
+            "phone": "+27821234567", "email": "mpho@example.test",
+            "province": "Mpumalanga", "locality": "eMalahleni",
+            "preferred_channel": "whatsapp", "category": "debt_counselling",
+            "source": "client_website_form", "processing_consent": True,
+            "marketing_consent": True, "notice_version": "consumer-v1",
+        }
+        with patch.dict(os.environ, settings):
+            created = api_request("POST", "/api/v1/consumer-enquiries", json=body)
+            self.assertEqual(created.status_code, 201, created.text)
+            item = created.json()
+            self.assertTrue(item["contact_protected"])
+            self.assertTrue(item["has_phone"])
+            self.assertTrue(item["has_email"])
+            self.assertTrue(item["marketing_consent"])
+            self.assertNotIn("full_name", item)
+            self.assertNotIn("phone", item)
+            self.assertNotIn("email", item)
+
+            listed = api_request("GET", "/api/v1/consumer-enquiries", params={"category": "debt_counselling"})
+            self.assertEqual(listed.status_code, 200, listed.text)
+            self.assertEqual(listed.json()["total"], 1)
+            self.assertEqual(listed.json()["items"][0]["category"], "debt_counselling")
+
+            denied = api_request("GET", f"/api/v1/consumer-enquiries/{item['id']}/contact")
+            self.assertEqual(denied.status_code, 403)
+            contact = api_request("GET", f"/api/v1/consumer-enquiries/{item['id']}/contact", headers={
+                "X-Arletion-Consumer-Access": settings["ARLETION_CONSUMER_ACCESS_KEY"],
+            })
+            self.assertEqual(contact.status_code, 200)
+            self.assertEqual(contact.json(), {
+                "full_name": "Mpho Testperson", "phone": "+27821234567", "email": "mpho@example.test",
+            })
+
+            duplicate = api_request("POST", "/api/v1/consumer-enquiries", json=body)
+            self.assertEqual(duplicate.status_code, 409)
+            withdrawn = api_request("POST", f"/api/v1/consumer-enquiries/{item['id']}/withdraw-marketing", headers={
+                "X-Arletion-Consumer-Access": settings["ARLETION_CONSUMER_ACCESS_KEY"],
+            })
+            self.assertEqual(withdrawn.status_code, 200)
+            self.assertFalse(withdrawn.json()["marketing_consent"])
+            self.assertTrue(withdrawn.json()["suppressed"])
+            api_request("POST", f"/api/v1/consumer-enquiries/{item['id']}/withdraw-marketing", headers={
+                "X-Arletion-Consumer-Access": settings["ARLETION_CONSUMER_ACCESS_KEY"],
+            })
+
+            campaigns = api_request("GET", "/api/v1/campaigns?pipeline=consumer").json()
+            self.assertEqual(len(campaigns), 1)
+            self.assertEqual(campaigns[0]["lead_count"], 1)
+            self.assertEqual(api_request("GET", "/api/v1/campaigns?pipeline=business_procurement").json(), [])
+            self.assertEqual(api_request("GET", "/api/v1/leads/search").json()["total"], 0)
+
+        with self.engine.connect() as connection:
+            encrypted = connection.execute(text(
+                "SELECT name_ciphertext, phone_ciphertext, email_ciphertext FROM consumer_enquiries"
+            )).one()
+            consent_rows = connection.execute(text(
+                "SELECT purpose, consent_status FROM consent_records ORDER BY purpose"
+            )).all()
+        self.assertNotIn("Mpho Testperson", encrypted.name_ciphertext)
+        self.assertNotIn("+27821234567", encrypted.phone_ciphertext)
+        self.assertNotIn("mpho@example.test", encrypted.email_ciphertext)
+        self.assertIn(("electronic_direct_marketing", "withdrawn"), consent_rows)
+        self.assertIn(("respond_to_consumer_enquiry", "granted"), consent_rows)
+        with self.engine.connect() as connection:
+            suppression_count = connection.execute(text("SELECT count(*) FROM suppression_records")).scalar_one()
+        self.assertEqual(suppression_count, 1)
+
+    def test_consumer_enquiry_requires_explicit_processing_consent_and_active_consumer_campaign(self):
+        invalid = api_request("POST", "/api/v1/consumer-enquiries", json={
+            "campaign_id": "00000000-0000-0000-0000-000000000001",
+            "full_name": "Test Person", "phone": "+27821234567",
+            "preferred_channel": "whatsapp", "processing_consent": False,
+            "notice_version": "v1",
+        })
+        self.assertEqual(invalid.status_code, 422)
+
+        business = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Business campaign", "objective": "Business only", "lead_type": "business",
+        }).json()
+        settings = {
+            "ARLETION_CONSUMER_INTAKE_ENABLED": "true",
+            "ARLETION_CONSUMER_STORAGE_APPROVED": "true",
+            "ARLETION_CONSUMER_RBAC_APPROVED": "true",
+            "ARLETION_PII_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+            "ARLETION_CONTACT_HASH_KEY": "test-contact-hash-key-that-is-at-least-32-bytes",
+            "ARLETION_CONSUMER_ACCESS_KEY": "separate-consumer-contact-secret",
+        }
+        with patch.dict(os.environ, settings):
+            wrong_campaign = api_request("POST", "/api/v1/consumer-enquiries", json={
+                "campaign_id": business["id"], "full_name": "Test Person",
+                "phone": "+27821234567", "preferred_channel": "whatsapp",
+                "processing_consent": True, "notice_version": "v1",
+            })
+        self.assertEqual(wrong_campaign.status_code, 404)
 
     def test_official_release_import_is_repeatable_and_amendments_update_by_ocid(self):
         first = {"ocid": "ocds-9t57fa-integration", "id": "release-1", "date": "2030-01-01T10:00:00Z", "tender": {"title": "Road resurfacing", "status": "active", "tenderPeriod": {"startDate": "2030-01-01", "endDate": "2030-06-01"}, "documents": [{"url": "https://data.etenders.gov.za/notice/one"}]}, "buyer": {"name": "Road agency"}}

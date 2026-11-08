@@ -3,6 +3,7 @@ export interface Campaign {
   name: string;
   objective: string;
   lead_type: string;
+  pipeline: "business_procurement" | "consumer";
   geography: string;
   status: string;
   lead_count: number;
@@ -35,6 +36,8 @@ export interface Source {
 export interface Summary {
   campaigns: number;
   leads: number;
+  business_leads: number;
+  consumer_enquiries: number;
   sources: number;
   qualified: number;
   demo_mode: boolean;
@@ -75,3 +78,35 @@ export function loadDashboardData(
   fetcher?: typeof fetch,
   timeoutMs?: number,
 ): Promise<{ campaigns: Campaign[]; leads: Lead[]; sources: Source[]; summary: Summary; opportunities: Opportunity[] }>;
+
+export interface ConsumerEnquiry {
+  id: string;
+  campaign_id: string;
+  contact_protected: boolean;
+  has_phone: boolean;
+  has_email: boolean;
+  category: string;
+  province: string | null;
+  locality: string | null;
+  preferred_channel: string;
+  source: string;
+  status: string;
+  processing_consent_at: string;
+  marketing_consent: boolean;
+  marketing_consent_at: string | null;
+  created_at: string;
+  retention_expires_at: string;
+}
+export interface ConsumerStatus {
+  enabled: boolean;
+  storage_approved: boolean;
+  staff_access_approved: boolean;
+  encryption_configured: boolean;
+  deduplication_key_configured: boolean;
+  separate_contact_access_configured: boolean;
+  public_form: boolean;
+  note: string;
+}
+export function loadConsumerStatus(apiBaseUrl: string, fetcher?: typeof fetch): Promise<ConsumerStatus>;
+export function loadConsumerPage(apiBaseUrl: string, filters?: { category?: string; status?: string; province?: string; page?: number; page_size?: number }, fetcher?: typeof fetch): Promise<{items: ConsumerEnquiry[]; page: number; page_size: number; total: number}>;
+export function createCampaign(apiBaseUrl: string, campaign: { name: string; objective: string; lead_type: string; geography: string; status: string; criteria: Record<string, unknown> }, fetcher?: typeof fetch): Promise<Campaign>;

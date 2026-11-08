@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
-import { loadDashboardData, loadLeadPage } from "../app/dashboard-api.mjs";
+import { createCampaign, loadConsumerPage, loadConsumerStatus, loadDashboardData, loadLeadPage } from "../app/dashboard-api.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const monorepoRoot = resolve(webRoot, "../..");
@@ -136,6 +136,56 @@ test("lead search surfaces API failures and the UI exposes server-side category 
   assert.match(page, /Previous/);
   assert.match(page, /Next/);
   assert.doesNotMatch(page, /const filtered=useMemo/);
+});
+
+test("consumer intake status and enquiries use separate API routes and category filters", async () => {
+  const status = await loadConsumerStatus("http://127.0.0.1:8000", async (url) => {
+    assert.ok(url.endsWith("/api/v1/consumer-enquiries/status"));
+    return { ok: true, json: async () => ({
+      enabled: false, storage_approved: false, encryption_configured: false,
+      deduplication_key_configured: false, separate_contact_access_configured: false,
+      public_form: false, note: "Disabled",
+    }) };
+  });
+  assert.equal(status.enabled, false);
+  let requested = "";
+  const page = await loadConsumerPage("http://127.0.0.1:8000", {
+    category: "debt_counselling", status: "new", province: "Mpumalanga",
+  }, async (url) => {
+    requested = url;
+    return { ok: true, json: async () => ({ items: [], page: 1, page_size: 25, total: 0 }) };
+  });
+  const parsed = new URL(requested);
+  assert.equal(parsed.pathname, "/api/v1/consumer-enquiries");
+  assert.equal(parsed.searchParams.get("category"), "debt_counselling");
+  assert.equal(parsed.searchParams.get("province"), "Mpumalanga");
+  assert.equal(page.total, 0);
+});
+
+test("campaign creation keeps consumer pipeline type and campaign category in criteria", async () => {
+  let request;
+  const created = await createCampaign("http://127.0.0.1:8000", {
+    name: "Debt enquiries", objective: "Respond to opt-in requests",
+    lead_type: "consumer_enquiry", geography: "South Africa", status: "draft",
+    criteria: { enquiry_category: "debt_counselling" },
+  }, async (url, options) => {
+    request = { url, options };
+    return { ok: true, json: async () => ({ id: "campaign-1", pipeline: "consumer" }) };
+  });
+  assert.ok(request.url.endsWith("/api/v1/campaigns"));
+  assert.equal(JSON.parse(request.options.body).lead_type, "consumer_enquiry");
+  assert.equal(JSON.parse(request.options.body).criteria.enquiry_category, "debt_counselling");
+  assert.equal(created.pipeline, "consumer");
+});
+
+test("dashboard renders separate protected consumer enquiry and business campaign screens", async () => {
+  const page = await read("app/page.tsx");
+  assert.match(page, /Consumer enquiries/);
+  assert.match(page, /Two separate campaign pipelines/);
+  assert.match(page, /Contact data remains encrypted/);
+  assert.match(page, /Consumer intake is safely disabled/);
+  assert.match(page, /marketing_consent/);
+  assert.doesNotMatch(page, /full_name|phone_ciphertext|email_ciphertext/);
 });
 
 test("dashboard data loader reports unavailable or failing API requests", async () => {

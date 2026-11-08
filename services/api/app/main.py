@@ -1,17 +1,20 @@
 from datetime import date, datetime, timezone
 import hmac
 import os
+import re
+from datetime import timedelta
 from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 from .database import DEFAULT_TENANT_ID, db_health, get_session
-from .models import Campaign as CampaignRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry
+from .models import Campaign as CampaignRow, ConsentRecord, ConsumerEnquiry as ConsumerEnquiryRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry, SuppressionRecord
+from .privacy import consumer_storage_ready, contact_fingerprint, decrypt_contact, encrypt_contact, valid_consumer_access
 from .procurement import import_opportunities, parse_import
 
 app = FastAPI(title="Arletion API", version="0.2.0", description="PostgreSQL-backed Arletion workspace and official OCDS import.")
@@ -51,6 +54,7 @@ async def require_api_key_in_protected_deployments(request, call_next):
 class Campaign(BaseModel):
     id: str; name: str; objective: str
     lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"]
+    pipeline: Literal["business_procurement", "consumer"]
     geography: str; status: Literal["draft", "active", "paused", "archived"]; lead_count: int = 0
 class Lead(BaseModel):
     id: str; organization: str; lead_type: str; category: str | None = None; location: str
@@ -63,6 +67,62 @@ class LeadPage(BaseModel):
     page: int
     page_size: int
     total: int
+class ConsumerEnquiryWrite(BaseModel):
+    campaign_id: UUID
+    full_name: str = Field(min_length=2, max_length=160)
+    phone: str | None = Field(default=None, max_length=32)
+    email: str | None = Field(default=None, max_length=254)
+    province: str | None = Field(default=None, max_length=100)
+    locality: str | None = Field(default=None, max_length=120)
+    preferred_channel: Literal["phone", "email", "whatsapp"]
+    category: Literal["debt_counselling", "debt_review_information", "budget_guidance", "general"] = "general"
+    source: str = Field(default="website_form", min_length=2, max_length=120)
+    processing_consent: bool
+    marketing_consent: bool = False
+    notice_version: str = Field(min_length=1, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_contact_and_permissions(self):
+        self.full_name = self.full_name.strip()
+        if not self.phone and not self.email:
+            raise ValueError("Provide a phone number or email address.")
+        if self.phone and not re.fullmatch(r"[+0-9() .-]{7,32}", self.phone.strip()):
+            raise ValueError("Provide a valid phone number.")
+        if self.email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", self.email.strip()):
+            raise ValueError("Provide a valid email address.")
+        if self.preferred_channel == "email" and not self.email:
+            raise ValueError("An email address is required for the selected contact channel.")
+        if self.preferred_channel in {"phone", "whatsapp"} and not self.phone:
+            raise ValueError("A phone number is required for the selected contact channel.")
+        if not self.processing_consent:
+            raise ValueError("Consent to process this enquiry is required.")
+        return self
+
+class ConsumerEnquiryItem(BaseModel):
+    id: str
+    campaign_id: str
+    contact_protected: bool = True
+    has_phone: bool
+    has_email: bool
+    category: str
+    province: str | None
+    locality: str | None
+    preferred_channel: str
+    source: str
+    status: str
+    processing_consent_at: datetime
+    marketing_consent: bool
+    marketing_consent_at: datetime | None
+    created_at: datetime
+    retention_expires_at: datetime
+
+class ConsumerEnquiryPage(BaseModel):
+    items: list[ConsumerEnquiryItem]
+    page: int
+    page_size: int
+    total: int
+
+
 class Source(BaseModel):
     id: str; name: str; category: str; url: str
     status: Literal["planned", "review_required", "enabled", "disabled"]; note: str
@@ -84,9 +144,10 @@ class CampaignUpdate(BaseModel):
     criteria: dict[str, Any] | None = None
 
 class LeadWrite(BaseModel):
+    """Business and procurement lead writer; consumers use the protected enquiry table."""
     campaign_id: UUID
     organization: str = Field(min_length=1, max_length=500)
-    lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"]
+    lead_type: Literal["business", "procurement", "partnership"]
     category: str | None = Field(default=None, max_length=120)
     location: str = Field(default="South Africa", max_length=180)
     province: str | None = Field(default=None, max_length=100)
@@ -141,44 +202,95 @@ def health():
 @app.get("/live")
 def live():
     return {"status":"ok", "service":"arletion-api", "timestamp":datetime.now(timezone.utc).isoformat()}
+def _consumer_ready() -> None:
+    if not consumer_storage_ready():
+        raise HTTPException(503, "Consumer intake is disabled until durable storage, encryption, retention and access controls are configured.")
+    try:
+        encrypt_contact("configuration-check")
+        contact_fingerprint("configuration-check", None)
+    except RuntimeError as error:
+        raise HTTPException(503, str(error)) from error
+
+
+def _consumer_access(supplied: str | None) -> None:
+    if not valid_consumer_access(supplied):
+        raise HTTPException(403, "A separate consumer-contact access credential is required.")
+
+
+def _consumer_item(row: ConsumerEnquiryRow) -> ConsumerEnquiryItem:
+    return ConsumerEnquiryItem(
+        id=str(row.id), campaign_id=str(row.campaign_id), category=row.category,
+        has_phone=bool(row.phone_ciphertext), has_email=bool(row.email_ciphertext),
+        province=row.province, locality=row.locality, preferred_channel=row.preferred_channel,
+        source=row.source, status=row.status, processing_consent_at=row.processing_consent_at,
+        marketing_consent=row.marketing_consent, marketing_consent_at=row.marketing_consent_at,
+        created_at=row.created_at, retention_expires_at=row.retention_expires_at,
+    )
+
+
 @app.get("/api/v1/summary")
 def summary(session: Session = Depends(get_session)):
     return {
       "campaigns": session.scalar(select(func.count(CampaignRow.id)).where(CampaignRow.tenant_id == DEFAULT_TENANT_ID)) or 0,
+      "business_leads": session.scalar(select(func.count(LeadRow.id)).where(LeadRow.tenant_id == DEFAULT_TENANT_ID, LeadRow.lead_type != "consumer_enquiry")) or 0,
+      "consumer_enquiries": session.scalar(select(func.count(ConsumerEnquiryRow.id)).where(ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID)) or 0,
       "leads": session.scalar(select(func.count(LeadRow.id)).where(LeadRow.tenant_id == DEFAULT_TENANT_ID)) or 0,
       "sources": session.scalar(select(func.count(SourceRegistry.id)) ) or 0,
       "qualified": session.scalar(select(func.count(LeadRow.id)).where(LeadRow.tenant_id == DEFAULT_TENANT_ID, LeadRow.score >= 70)) or 0,
       "demo_mode":False,"message":"Workspace records are stored in PostgreSQL."
     }
+def _campaign_item(row: CampaignRow, session: Session) -> Campaign:
+    geography = row.geography if isinstance(row.geography, str) else ", ".join(str(value) for value in row.geography.values() if value)
+    count_query = select(func.count(ConsumerEnquiryRow.id)).where(ConsumerEnquiryRow.campaign_id == row.id) if row.lead_type == "consumer_enquiry" else select(func.count(LeadRow.id)).where(LeadRow.campaign_id == row.id)
+    return Campaign(
+        id=str(row.id), name=row.name, objective=row.objective, lead_type=row.lead_type,
+        pipeline="consumer" if row.lead_type == "consumer_enquiry" else "business_procurement",
+        geography=geography or "South Africa", status=row.status, lead_count=session.scalar(count_query) or 0,
+    )
+
+
 @app.get("/api/v1/campaigns", response_model=list[Campaign])
-def get_campaigns(session: Session = Depends(get_session)):
-    rows=session.scalars(select(CampaignRow).where(CampaignRow.tenant_id==DEFAULT_TENANT_ID).order_by(CampaignRow.created_at.desc())).all()
-    result=[]
-    for row in rows:
-        geography=row.geography if isinstance(row.geography,str) else ", ".join(str(value) for value in row.geography.values() if value)
-        result.append(Campaign(id=str(row.id),name=row.name,objective=row.objective,lead_type=row.lead_type,geography=geography or "South Africa",status=row.status,lead_count=session.scalar(select(func.count(LeadRow.id)).where(LeadRow.campaign_id==row.id)) or 0))
-    return result
+def get_campaigns(
+    pipeline: Literal["business_procurement", "consumer"] | None = None,
+    session: Session = Depends(get_session),
+):
+    statement = select(CampaignRow).where(CampaignRow.tenant_id == DEFAULT_TENANT_ID)
+    if pipeline == "consumer":
+        statement = statement.where(CampaignRow.lead_type == "consumer_enquiry")
+    elif pipeline == "business_procurement":
+        statement = statement.where(CampaignRow.lead_type != "consumer_enquiry")
+    return [_campaign_item(row, session) for row in session.scalars(statement.order_by(CampaignRow.created_at.desc())).all()]
+
 
 @app.post("/api/v1/campaigns", response_model=Campaign, status_code=201)
 def create_campaign(payload: CampaignWrite, session: Session = Depends(get_session)):
-    row=CampaignRow(tenant_id=DEFAULT_TENANT_ID,name=payload.name,objective=payload.objective,lead_type=payload.lead_type,
-                    geography={"label":payload.geography},criteria=payload.criteria,status=payload.status)
-    session.add(row); session.commit(); session.refresh(row)
-    return Campaign(id=str(row.id),name=row.name,objective=row.objective,lead_type=row.lead_type,geography=payload.geography,status=row.status,lead_count=0)
+    row = CampaignRow(
+        tenant_id=DEFAULT_TENANT_ID, name=payload.name.strip(), objective=payload.objective.strip(),
+        lead_type=payload.lead_type, geography={"label": payload.geography},
+        criteria=payload.criteria, status=payload.status,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return _campaign_item(row, session)
+
 
 @app.patch("/api/v1/campaigns/{campaign_id}", response_model=Campaign)
 def update_campaign(campaign_id: UUID, payload: CampaignUpdate, session: Session = Depends(get_session)):
-    row=session.scalar(select(CampaignRow).where(CampaignRow.id==campaign_id,CampaignRow.tenant_id==DEFAULT_TENANT_ID))
-    if row is None: raise HTTPException(status_code=404,detail="Campaign not found.")
-    for key,value in payload.model_dump(exclude_unset=True).items():
+    row = session.scalar(select(CampaignRow).where(CampaignRow.id == campaign_id, CampaignRow.tenant_id == DEFAULT_TENANT_ID))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Campaign not found.")
+    for key, value in payload.model_dump(exclude_unset=True).items():
         if value is not None:
-            setattr(row,key,{"label":value} if key=="geography" else value)
-    session.commit(); session.refresh(row)
-    geography=row.geography if isinstance(row.geography,str) else ", ".join(str(value) for value in row.geography.values() if value)
-    return Campaign(id=str(row.id),name=row.name,objective=row.objective,lead_type=row.lead_type,geography=geography or "South Africa",status=row.status,lead_count=session.scalar(select(func.count(LeadRow.id)).where(LeadRow.campaign_id==row.id)) or 0)
+            setattr(row, key, {"label": value} if key == "geography" else value)
+    session.commit()
+    session.refresh(row)
+    return _campaign_item(row, session)
+
+
 @app.get("/api/v1/leads", response_model=list[Lead])
 def get_leads(q: str | None = Query(default=None, max_length=120), lead_type: str | None = None, session: Session = Depends(get_session)):
-    statement=select(LeadRow).where(LeadRow.tenant_id==DEFAULT_TENANT_ID)
+    statement=select(LeadRow).where(LeadRow.tenant_id==DEFAULT_TENANT_ID, LeadRow.lead_type != "consumer_enquiry")
     if lead_type: statement=statement.where(LeadRow.lead_type==lead_type)
     result=[]
     for row in session.scalars(statement.order_by(LeadRow.created_at.desc())).all():
@@ -194,7 +306,7 @@ def get_leads(q: str | None = Query(default=None, max_length=120), lead_type: st
 @app.get("/api/v1/leads/search", response_model=LeadPage)
 def search_leads(
     q: str | None = Query(default=None, max_length=120),
-    lead_type: Literal["business", "procurement", "consumer_enquiry", "partnership"] | None = None,
+    lead_type: Literal["business", "procurement", "partnership"] | None = None,
     category: str | None = Query(default=None, max_length=120),
     status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
     province: str | None = Query(default=None, max_length=100),
@@ -280,10 +392,175 @@ def lead_categories(session: Session = Depends(get_session)):
     ).all()
 
 
+@app.get("/api/v1/consumer-enquiries/status")
+def consumer_intake_status():
+    return {
+        "enabled": consumer_storage_ready(),
+        "storage_approved": os.getenv("ARLETION_CONSUMER_STORAGE_APPROVED", "false").lower() == "true",
+        "staff_access_approved": os.getenv("ARLETION_CONSUMER_RBAC_APPROVED", "false").lower() == "true",
+        "encryption_configured": bool(os.getenv("ARLETION_PII_ENCRYPTION_KEY")),
+        "deduplication_key_configured": len(os.getenv("ARLETION_CONTACT_HASH_KEY", "")) >= 32,
+        "separate_contact_access_configured": bool(os.getenv("ARLETION_CONSUMER_ACCESS_KEY")),
+        "public_form": False,
+        "note": "Contact capture remains disabled until all storage and security controls are explicitly enabled.",
+    }
+
+
+@app.get("/api/v1/consumer-enquiries", response_model=ConsumerEnquiryPage)
+def get_consumer_enquiries(
+    status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
+    category: Literal["debt_counselling", "debt_review_information", "budget_guidance", "general"] | None = None,
+    province: str | None = Query(default=None, max_length=100),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=25, ge=1, le=100),
+    session: Session = Depends(get_session),
+):
+    _consumer_ready()
+    statement = select(ConsumerEnquiryRow).where(ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID)
+    if status:
+        statement = statement.where(ConsumerEnquiryRow.status == status)
+    if category:
+        statement = statement.where(ConsumerEnquiryRow.category == category)
+    if province:
+        statement = statement.where(func.lower(ConsumerEnquiryRow.province) == province.strip().lower())
+    total = session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    rows = session.scalars(statement.order_by(ConsumerEnquiryRow.created_at.desc()).offset((page - 1) * page_size).limit(page_size)).all()
+    return ConsumerEnquiryPage(items=[_consumer_item(row) for row in rows], page=page, page_size=page_size, total=total)
+
+
+@app.post("/api/v1/consumer-enquiries", response_model=ConsumerEnquiryItem, status_code=201)
+def create_consumer_enquiry(payload: ConsumerEnquiryWrite, session: Session = Depends(get_session)):
+    _consumer_ready()
+    campaign = session.scalar(select(CampaignRow).where(
+        CampaignRow.id == payload.campaign_id,
+        CampaignRow.tenant_id == DEFAULT_TENANT_ID,
+        CampaignRow.lead_type == "consumer_enquiry",
+        CampaignRow.status == "active",
+    ))
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="An active consumer-enquiry campaign is required.")
+    fingerprint = contact_fingerprint(payload.phone, payload.email)
+    duplicate = session.scalar(select(ConsumerEnquiryRow.id).where(
+        ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID,
+        ConsumerEnquiryRow.campaign_id == campaign.id,
+        ConsumerEnquiryRow.contact_fingerprint == fingerprint,
+    ))
+    if duplicate:
+        raise HTTPException(status_code=409, detail="An enquiry from this contact already exists in this campaign.")
+    try:
+        retention_days = int(os.getenv("ARLETION_CONSUMER_RETENTION_DAYS", "90"))
+    except ValueError:
+        raise HTTPException(status_code=503, detail="Consumer retention configuration is invalid.") from None
+    if not 30 <= retention_days <= 365:
+        raise HTTPException(status_code=503, detail="ARLETION_CONSUMER_RETENTION_DAYS must be between 30 and 365.")
+    now = datetime.now(timezone.utc)
+    try:
+        row = ConsumerEnquiryRow(
+            tenant_id=DEFAULT_TENANT_ID, campaign_id=campaign.id, contact_fingerprint=fingerprint,
+            name_ciphertext=encrypt_contact(payload.full_name.strip()),
+            phone_ciphertext=encrypt_contact(payload.phone.strip()) if payload.phone else None,
+            email_ciphertext=encrypt_contact(payload.email.strip().lower()) if payload.email else None,
+            province=payload.province.strip() if payload.province else None,
+            locality=payload.locality.strip() if payload.locality else None,
+            category=payload.category, preferred_channel=payload.preferred_channel, source=payload.source.strip(),
+            processing_consent_at=now, marketing_consent=payload.marketing_consent,
+            marketing_consent_at=now if payload.marketing_consent else None,
+            notice_version=payload.notice_version.strip(),
+            retention_expires_at=now + timedelta(days=retention_days),
+        )
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    session.add(row)
+    session.flush()
+    session.add(ConsentRecord(
+        tenant_id=DEFAULT_TENANT_ID, subject_reference=fingerprint,
+        purpose="respond_to_consumer_enquiry", channel=payload.preferred_channel,
+        consent_status="granted", captured_at=now, notice_version=payload.notice_version,
+        evidence_reference=f"consumer-enquiry:{row.id}:processing",
+    ))
+    if payload.marketing_consent:
+        session.add(ConsentRecord(
+            tenant_id=DEFAULT_TENANT_ID, subject_reference=fingerprint,
+            purpose="electronic_direct_marketing", channel=payload.preferred_channel,
+            consent_status="granted", captured_at=now, notice_version=payload.notice_version,
+            evidence_reference=f"consumer-enquiry:{row.id}:marketing-opt-in",
+        ))
+    session.commit()
+    session.refresh(row)
+    return _consumer_item(row)
+
+
+@app.get("/api/v1/consumer-enquiries/{enquiry_id}/contact")
+def get_consumer_contact(
+    enquiry_id: UUID,
+    x_arletion_consumer_access: str | None = Header(default=None),
+    session: Session = Depends(get_session),
+):
+    _consumer_ready()
+    _consumer_access(x_arletion_consumer_access)
+    row = session.scalar(select(ConsumerEnquiryRow).where(
+        ConsumerEnquiryRow.id == enquiry_id, ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID
+    ))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Consumer enquiry not found.")
+    try:
+        return {
+            "full_name": decrypt_contact(row.name_ciphertext),
+            "phone": decrypt_contact(row.phone_ciphertext) if row.phone_ciphertext else None,
+            "email": decrypt_contact(row.email_ciphertext) if row.email_ciphertext else None,
+        }
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+@app.post("/api/v1/consumer-enquiries/{enquiry_id}/withdraw-marketing")
+def withdraw_consumer_marketing(
+    enquiry_id: UUID,
+    x_arletion_consumer_access: str | None = Header(default=None),
+    session: Session = Depends(get_session),
+):
+    _consumer_ready()
+    _consumer_access(x_arletion_consumer_access)
+    row = session.scalar(select(ConsumerEnquiryRow).where(
+        ConsumerEnquiryRow.id == enquiry_id, ConsumerEnquiryRow.tenant_id == DEFAULT_TENANT_ID
+    ))
+    if row is None:
+        raise HTTPException(status_code=404, detail="Consumer enquiry not found.")
+    row.marketing_consent = False
+    row.marketing_consent_at = None
+    records = session.scalars(select(ConsentRecord).where(
+        ConsentRecord.tenant_id == DEFAULT_TENANT_ID,
+        ConsentRecord.subject_reference == row.contact_fingerprint,
+        ConsentRecord.purpose == "electronic_direct_marketing",
+        ConsentRecord.consent_status == "granted",
+    )).all()
+    now = datetime.now(timezone.utc)
+    for record in records:
+        record.consent_status = "withdrawn"
+        record.withdrawn_at = now
+    suppression = session.scalar(select(SuppressionRecord).where(
+        SuppressionRecord.tenant_id == DEFAULT_TENANT_ID,
+        SuppressionRecord.subject_reference == row.contact_fingerprint,
+        SuppressionRecord.channel == row.preferred_channel,
+        SuppressionRecord.status == "active",
+    ))
+    if suppression is None:
+        session.add(SuppressionRecord(
+            tenant_id=DEFAULT_TENANT_ID, subject_reference=row.contact_fingerprint,
+            channel=row.preferred_channel, reason="Consumer withdrew electronic marketing consent",
+            status="active",
+        ))
+    session.commit()
+    return {"id": str(row.id), "marketing_consent": False, "suppressed": True}
+
+
 @app.post("/api/v1/leads", response_model=Lead, status_code=201)
 def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
     campaign=session.scalar(select(CampaignRow).where(CampaignRow.id==payload.campaign_id,CampaignRow.tenant_id==DEFAULT_TENANT_ID))
-    if campaign is None: raise HTTPException(status_code=404,detail="Campaign not found in this workspace.")
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Campaign not found in this workspace.")
+    if campaign.lead_type == "consumer_enquiry" or campaign.lead_type != payload.lead_type:
+        raise HTTPException(status_code=409, detail="Business leads must use a matching business/procurement campaign.")
     normalized=" ".join(payload.organization.casefold().split())
     org=session.scalar(select(Organization).where(Organization.normalized_name==normalized,Organization.country_code=="ZA"))
     if org is None:
