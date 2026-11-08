@@ -67,7 +67,7 @@ def overpass_query(category: str, latitude: float, longitude: float, radius_m: i
         raise ValueError("Choose a supported business category.")
     clauses = []
     for key, values in filters.items():
-        tag_filter = f'["{key}"]' if not values else f'["{key}"~"^(?:{"|".join(re.escape(value) for value in values)})$",i]'
+        tag_filter = f'["{key}"]' if not values else f'["{key}"~"^({"|".join(re.escape(value) for value in values)})$",i]'
         clauses.append(
             f'nwr(around:{radius_m},{latitude:.6f},{longitude:.6f})["name"]{tag_filter};'
         )
