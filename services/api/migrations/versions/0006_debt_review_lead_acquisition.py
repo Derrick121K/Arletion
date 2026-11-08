@@ -1,11 +1,11 @@
 """Expand consent-based debt review categories and add NCR source registry.
 
-Revision ID: 0006_debt_review_lead_acquisition
+Revision ID: 0006_debt_review_leads
 Revises: 0005_free_osm_business_sources
 """
 from alembic import op
 
-revision = "0006_debt_review_lead_acquisition"
+revision = "0006_debt_review_leads"
 down_revision = "0005_free_osm_business_sources"
 branch_labels = None
 depends_on = None
