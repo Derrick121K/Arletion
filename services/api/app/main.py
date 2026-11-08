@@ -7,7 +7,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 from .database import DEFAULT_TENANT_ID, db_health, get_session
