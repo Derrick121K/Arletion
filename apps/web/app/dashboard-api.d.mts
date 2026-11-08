@@ -172,3 +172,18 @@ export function importOfficialOpportunityPages(
   request: { start_page: number; page_size: number; page_count: number; date_from: string; date_to: string },
   fetcher?: typeof fetch,
 ): Promise<OfficialBatchImportResult>;
+
+export interface LeadVerificationResult {
+  lead_id: string;
+  verification_status: "officially_verified" | "needs_review";
+  verification_source: string;
+  verified_at: string;
+  evidence_url: string;
+  reference: string;
+}
+export function recordLeadVerification(
+  apiBaseUrl: string,
+  leadId: string,
+  payload: { registry: "CSD" | "CIPC"; result: "verified" | "not_found" | "inactive" | "restricted" | "unknown"; evidence_url: string; reference: string; note?: string; checked_at: string },
+  fetcher?: typeof fetch,
+): Promise<LeadVerificationResult>;
