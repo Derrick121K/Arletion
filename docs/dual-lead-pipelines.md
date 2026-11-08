@@ -20,16 +20,17 @@
 1. Move away from Render Free Postgres to durable managed Postgres with tested automated backups and restore.
 2. Configure `ARLETION_PII_ENCRYPTION_KEY` (Fernet key), `ARLETION_CONTACT_HASH_KEY` (32+ random characters), and `ARLETION_CONSUMER_ACCESS_KEY` as server-only secrets. Establish key rotation and recovery procedures before receiving any records.
 3. Replace the shared preview login/API credential with individual user accounts, roles and audited access to consumer contact decryption.
-4. Verify the privacy notice, responsible-party/operator allocation, purpose and retention schedule, direct-marketing consent copy and data-subject request workflow with the Information Officer/legal adviser.
-5. Implement the scheduled expiry/purge job and verify backup retention/deletion rules.
-6. Complete NCC National Consumer Opt-Out Registry registration/list-cleansing checks before any outbound direct marketing. Arletion currently has no registry connector.
-7. Implement and test an anti-abuse public form (CSRF, rate limits, CAPTCHA/bot protection, request size limits, monitoring and incident response) before enabling public submission.
-8. Connect Google/Meta lead forms only with client-approved credentials and field mapping. WhatsApp messaging remains disabled until a supported provider, opt-in, templates and opt-out handling are configured.
+4. Implement individual staff accounts, least-privilege roles, and auditable approval for consumer-contact decryption; then set `ARLETION_CONSUMER_RBAC_APPROVED=true` only after security review.
+5. Verify the privacy notice, responsible-party/operator allocation, purpose and retention schedule, direct-marketing consent copy and data-subject request workflow with the Information Officer/legal adviser.
+6. Implement the scheduled expiry/purge job and verify backup retention/deletion rules.
+7. Complete NCC National Consumer Opt-Out Registry registration/list-cleansing checks before any outbound direct marketing. Arletion currently has no registry connector.
+8. Implement and test an anti-abuse public form (CSRF, rate limits, CAPTCHA/bot protection, request size limits, monitoring and incident response) before enabling public submission.
+9. Connect Google/Meta lead forms only with client-approved credentials and field mapping. WhatsApp messaging remains disabled until a supported provider, opt-in, templates and opt-out handling are configured.
 
 ## Current environment
 The hosted Render preview intentionally sets:
 - `ARLETION_CONSUMER_INTAKE_ENABLED=false`
-- `ARLETION_CONSUMER_STORAGE_APPROVED=false`
+- `ARLETION_CONSUMER_STORAGE_APPROVED=false` and `ARLETION_CONSUMER_RBAC_APPROVED=false`
 - `ARLETION_CONSUMER_RETENTION_DAYS=90`
 
 The free Postgres database is temporary and has no backups. The consumer intake code must not be activated in this environment. Its records remain isolated and encrypted in the schema, but the activation flag is the required guard.
