@@ -71,13 +71,17 @@ test("production dashboard uses the protected same-origin API proxy", async () =
   assert.match(render, /sync: false/);
 });
 
-test("opportunities page offers a date-bounded official import", async () => {
+test("opportunities page offers bounded, resumable official Treasury imports", async () => {
   const page = await read("app/page.tsx");
-  assert.match(page, /Import official eTender page/);
+  const api = await read("app/dashboard-api.mjs");
+  assert.match(page, /Import next eTender pages/);
   assert.match(page, /Approve source first/);
   assert.match(page, /approveSource/);
   assert.match(page, /date_from:dateFrom/);
   assert.match(page, /date_to:dateTo/);
+  assert.match(page, /treasuryStartPage/);
+  assert.match(api, /importOfficialOpportunityPages/);
+  assert.match(api, /official\/batch/);
   assert.ok(page.includes("setReloadKey(value=>value+1)"));
 });
 
@@ -217,12 +221,14 @@ test("OpenStreetMap UI labels mapped records as source-confirmed, not CIPC verif
   assert.match(page, /Find free local businesses/);
   assert.match(page, /OpenStreetMap business discovery/);
   assert.match(page, /Source-confirmed/);
-  assert.match(page, /not automatic CIPC or trading-status verification/);
+  assert.match(page, /not CIPC or trading-status verification/);
   assert.match(page, /ODbL licence and attribution/);
   assert.match(page, /importOpenStreetMapBusinesses/);
   assert.match(page, /Government-awarded suppliers/);
   assert.match(page, /Import awarded companies as leads/);
   assert.match(page, /Check CSD/);
+  assert.match(page, /Record CSD\/CIPC check/);
+  assert.match(page, /recordManualVerification/);
 });
 
 test("dashboard data loader reports unavailable or failing API requests", async () => {
