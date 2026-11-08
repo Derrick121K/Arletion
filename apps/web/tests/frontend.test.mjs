@@ -219,7 +219,10 @@ test("OpenStreetMap UI labels mapped records as source-confirmed, not CIPC verif
   assert.match(page, /Source-confirmed/);
   assert.match(page, /not automatic CIPC or trading-status verification/);
   assert.match(page, /ODbL licence and attribution/);
-  assert.match(page, /OpenStreetMap import/);
+  assert.match(page, /importOpenStreetMapBusinesses/);
+  assert.match(page, /Government-awarded suppliers/);
+  assert.match(page, /Import awarded companies as leads/);
+  assert.match(page, /Check CSD/);
 });
 
 test("dashboard data loader reports unavailable or failing API requests", async () => {
