@@ -34,3 +34,12 @@ The hosted Render preview intentionally sets:
 - `ARLETION_CONSUMER_RETENTION_DAYS=90`
 
 The free Postgres database is temporary and has no backups. The consumer intake code must not be activated in this environment. Its records remain isolated and encrypted in the schema, but the activation flag is the required guard.
+
+## Free source-backed business and procurement lead acquisition
+- OpenStreetMap: low-volume category/radius search through the public Overpass API. A returned record is a named map feature, not a CIPC/CSD or active-trading verification. The importer stores the original OSM object link, object ID, category, public website domain (if mapped), OSM edit timestamp when supplied, and import timestamp. It does not import OSM personal phone/email tags.
+- National Treasury eTender: once the operator approves the official source and imports OCDS releases, Arletion can extract company-form supplier names from published awards. Each lead retains the source release link, OCID, award ID and supplier identifier. It does not import individual-person suppliers or private contacts.
+- CSD: the dashboard links to the official supplier portal for a manual current-status check. No public bulk CSD API has been integrated. A supplier named in an award is not automatically a currently active CSD supplier.
+- CIPC: the official APIVerse uses OAuth; credentials, cost and allowed reuse need confirmation before an automated verification connector is enabled.
+- The two source imports are deduplicated against stable OSM object IDs or supplier identifiers; repeat imports refresh evidence rather than multiplying leads.
+- The source_confirmed label means the source record is present. Only a dated, completed CSD/CIPC check can justify officially_verified.
+- OSM public Overpass is a small-project service; Arletion enforces a 15 km radius ceiling, a 200-record limit and one import per minute. For national or high-volume coverage use a suitable regional extract or self-hosted service after reviewing ODbL obligations.

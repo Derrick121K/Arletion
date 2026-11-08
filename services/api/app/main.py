@@ -12,10 +12,11 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
-from .database import DEFAULT_TENANT_ID, db_health, get_session
-from .models import Campaign as CampaignRow, ConsentRecord, ConsumerEnquiry as ConsumerEnquiryRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry, SuppressionRecord
+from .database import DEFAULT_TENANT_ID, ETENDERS_SOURCE_ID, db_health, get_session
+from .models import AuditEvent, Campaign as CampaignRow, ConsentRecord, ConsumerEnquiry as ConsumerEnquiryRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry, SuppressionRecord
 from .privacy import consumer_storage_ready, contact_fingerprint, decrypt_contact, encrypt_contact, valid_consumer_access
-from .procurement import import_opportunities, parse_import
+from .procurement import extract_awarded_business_suppliers, import_opportunities, parse_import
+from .business_sources import OSM_ATTRIBUTION, OSM_SOURCE, fetch_osm_businesses
 
 app = FastAPI(title="Arletion API", version="0.2.0", description="PostgreSQL-backed Arletion workspace and official OCDS import.")
 cors_origins = [origin.strip().rstrip("/") for origin in os.getenv(
@@ -58,7 +59,11 @@ class Campaign(BaseModel):
     geography: str; status: Literal["draft", "active", "paused", "archived"]; lead_count: int = 0
 class Lead(BaseModel):
     id: str; organization: str; lead_type: str; category: str | None = None; location: str
-    province: str | None = None; source: str; source_url: str; status: str
+    province: str | None = None; website_url: str | None = None
+    source: str; source_url: str; status: str
+    verification_status: Literal["unverified", "source_confirmed", "officially_verified", "needs_review"] = "unverified"
+    verification_source: str | None = None; verified_at: datetime | None = None
+    source_updated_at: datetime | None = None
     score: int = Field(ge=0, le=100); evidence_note: str; demo: bool = True
 
 class LeadPage(BaseModel):
@@ -166,6 +171,51 @@ class LeadWrite(BaseModel):
             raise ValueError("source_url must be an absolute HTTP or HTTPS URL")
         return self
 
+class OpenStreetMapImportWrite(BaseModel):
+    campaign_id: UUID
+    category: Literal[
+        "Construction", "Building materials", "Transport and logistics", "IT and software",
+        "Training and education", "Cleaning and facilities", "Security services", "Agriculture",
+        "Manufacturing", "Retail and wholesale", "Professional services",
+    ]
+    locality: str = Field(default="eMalahleni", min_length=2, max_length=120)
+    province: str = Field(default="Mpumalanga", min_length=2, max_length=100)
+    latitude: float = Field(default=-25.8762, ge=-90, le=90)
+    longitude: float = Field(default=29.21, ge=-180, le=180)
+    radius_m: int = Field(default=10000, ge=1000, le=15000)
+    limit: int = Field(default=100, ge=1, le=200)
+
+
+class EtenderAwardSupplierImportWrite(BaseModel):
+    campaign_id: UUID
+    max_releases: int = Field(default=500, ge=1, le=2000)
+
+
+class LeadVerificationWrite(BaseModel):
+    registry: Literal["CSD", "CIPC"]
+    result: Literal["verified", "not_found", "inactive", "restricted", "unknown"]
+    evidence_url: str = Field(min_length=12, max_length=2000)
+    reference: str = Field(min_length=2, max_length=160)
+    note: str = Field(default="", max_length=1000)
+    checked_at: datetime
+
+    @model_validator(mode="after")
+    def validate_official_evidence(self):
+        parsed = urlsplit(self.evidence_url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        allowed = (
+            {"secure.csd.gov.za"} if self.registry == "CSD"
+            else {"cipc.co.za", "www.cipc.co.za", "eservices.cipc.co.za", "bizportal.gov.za"}
+        )
+        if parsed.scheme != "https" or host not in allowed or parsed.username or parsed.password:
+            raise ValueError("Evidence URL must be an HTTPS page on the selected official CSD/CIPC domain.")
+        if self.checked_at.tzinfo is None:
+            raise ValueError("checked_at must include a timezone.")
+        if self.checked_at > datetime.now(timezone.utc):
+            raise ValueError("checked_at cannot be in the future.")
+        return self
+
+
 class SourceWrite(BaseModel):
     name: str = Field(min_length=1, max_length=300)
     url: str = Field(min_length=8, max_length=2000)
@@ -179,6 +229,20 @@ class SourceWrite(BaseModel):
         if parsed.scheme not in {"http", "https"} or not parsed.hostname:
             raise ValueError("url must be an absolute HTTP or HTTPS URL")
         return self
+
+class OfficialBatchImportWrite(BaseModel):
+    start_page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=100, ge=1, le=100)
+    page_count: int = Field(default=4, ge=1, le=4)
+    date_from: date
+    date_to: date
+
+    @model_validator(mode="after")
+    def validate_batch(self):
+        if self.date_to < self.date_from:
+            raise ValueError("date_to must not be earlier than date_from")
+        return self
+
 
 class OfficialImportWrite(BaseModel):
     page_number: int = Field(default=1, ge=1)
@@ -298,7 +362,7 @@ def get_leads(q: str | None = Query(default=None, max_length=120), lead_type: st
         evidence=session.scalar(select(SourceRecord).where(SourceRecord.external_id==str(row.id)))
         source=session.get(SourceRegistry,evidence.source_id) if evidence else None
         location=", ".join(x for x in [org.locality if org else None,org.municipality if org else None,org.province if org else None] if x) or "South Africa"
-        item=Lead(id=str(row.id),organization=org.canonical_name if org else "Unspecified organization",lead_type=row.lead_type,category=org.business_category if org else None,location=location,province=org.province if org else None,source=source.name if source else "Source record",source_url=evidence.source_url if evidence else "https://data.etenders.gov.za/",status=row.status,score=row.score,evidence_note=row.qualification_reason or "Source evidence attached.",demo=False)
+        item=Lead(id=str(row.id),organization=org.canonical_name if org else "Unspecified organization",lead_type=row.lead_type,category=org.business_category if org else None,location=location,province=org.province if org else None,website_url=f"https://{org.website_domain}" if org and org.website_domain else None,source=source.name if source else "Source record",source_url=evidence.source_url if evidence else "https://data.etenders.gov.za/",status=row.status,verification_status=row.verification_status,verification_source=row.verification_source,verified_at=row.verified_at,source_updated_at=evidence.source_updated_at if evidence else None,score=row.score,evidence_note=row.qualification_reason or "Source evidence attached.",demo=False)
         if not q or q.casefold() in item.organization.casefold() or q.casefold() in item.location.casefold(): result.append(item)
     return result
 
@@ -310,6 +374,7 @@ def search_leads(
     category: str | None = Query(default=None, max_length=120),
     status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
     province: str | None = Query(default=None, max_length=100),
+    verification_status: Literal["unverified", "source_confirmed", "officially_verified", "needs_review"] | None = None,
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
     session: Session = Depends(get_session),
@@ -326,6 +391,8 @@ def search_leads(
         statement = statement.where(LeadRow.status == status)
     if province:
         statement = statement.where(func.lower(Organization.province) == province.strip().lower())
+    if verification_status:
+        statement = statement.where(LeadRow.verification_status == verification_status)
     if q:
         term = f"%{q.strip()}%"
         statement = statement.where(
@@ -360,9 +427,14 @@ def search_leads(
             category=org.business_category if org else None,
             location=location,
             province=org.province if org else None,
+            website_url=f"https://{org.website_domain}" if org and org.website_domain else None,
             source=source.name if source else "Source record",
             source_url=evidence.source_url if evidence else "https://data.etenders.gov.za/",
             status=row.status,
+            verification_status=row.verification_status,
+            verification_source=row.verification_source,
+            verified_at=row.verified_at,
+            source_updated_at=evidence.source_updated_at if evidence else None,
             score=row.score,
             evidence_note=row.qualification_reason or "Source evidence attached.",
             demo=False,
@@ -390,6 +462,181 @@ def lead_categories(session: Session = Depends(get_session)):
             Organization.business_category != "",
         ).distinct().order_by(Organization.business_category)
     ).all()
+
+
+@app.post("/api/v1/leads/{lead_id}/verification")
+def record_lead_verification(
+    lead_id: UUID,
+    payload: LeadVerificationWrite,
+    session: Session = Depends(get_session),
+):
+    lead = session.scalar(select(LeadRow).where(
+        LeadRow.id == lead_id,
+        LeadRow.tenant_id == DEFAULT_TENANT_ID,
+        LeadRow.lead_type != "consumer_enquiry",
+    ))
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Business lead not found.")
+    lead.verification_status = "officially_verified" if payload.result == "verified" else "needs_review"
+    lead.verification_source = f"{payload.registry} manual registry check"
+    lead.verified_at = payload.checked_at
+    previous = lead.qualification_reason or ""
+    note = f"{payload.registry} check: {payload.result}; reference {payload.reference}; checked {payload.checked_at.isoformat()}. {payload.note}".strip()
+    lead.qualification_reason = (previous + " " + note).strip()[:2000]
+    session.add(AuditEvent(
+        tenant_id=DEFAULT_TENANT_ID,
+        actor_user_id=os.getenv("ARLETION_OPERATOR_ID", "workspace_operator"),
+        action="lead.registry_verification.recorded",
+        entity_type="lead",
+        entity_id=str(lead.id),
+        metadata_json={
+            "registry": payload.registry, "result": payload.result,
+            "evidence_url": payload.evidence_url, "reference": payload.reference,
+            "checked_at": payload.checked_at.isoformat(), "note": payload.note,
+        },
+    ))
+    session.commit()
+    return {
+        "lead_id": str(lead.id),
+        "verification_status": lead.verification_status,
+        "verification_source": lead.verification_source,
+        "verified_at": lead.verified_at,
+        "evidence_url": payload.evidence_url,
+        "reference": payload.reference,
+    }
+
+
+@app.post("/api/v1/leads/import/openstreetmap")
+def import_openstreetmap_businesses(payload: OpenStreetMapImportWrite, session: Session = Depends(get_session)):
+    source = session.scalar(select(SourceRegistry).where(SourceRegistry.name == OSM_SOURCE))
+    if source is None or not source.enabled or source.permitted_use != "approved":
+        raise HTTPException(status_code=409, detail="The OpenStreetMap source is not approved in the source registry.")
+    now = datetime.now(timezone.utc)
+    if source.last_synced_at and (now - source.last_synced_at).total_seconds() < 60:
+        raise HTTPException(status_code=429, detail="OpenStreetMap search is rate-limited to one import per minute. Retry shortly.")
+    campaign = session.scalar(select(CampaignRow).where(
+        CampaignRow.id == payload.campaign_id,
+        CampaignRow.tenant_id == DEFAULT_TENANT_ID,
+    ))
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Business campaign not found.")
+    if campaign.lead_type not in {"business", "partnership"}:
+        raise HTTPException(status_code=409, detail="OpenStreetMap listings can only be imported into a business or partnership campaign.")
+    try:
+        businesses = fetch_osm_businesses(
+            payload.category, payload.latitude, payload.longitude, payload.radius_m,
+            payload.locality, payload.province, payload.limit,
+        )
+    except RuntimeError as error:
+        source.last_error = str(error)
+        session.commit()
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+    inserted = updated = skipped = 0
+    for item in businesses:
+        external_id = item["external_id"]
+        source_record = session.scalar(select(SourceRecord).where(
+            SourceRecord.source_id == source.id,
+            SourceRecord.external_id == external_id,
+        ))
+        organization = None
+        if source_record and source_record.raw_payload:
+            try:
+                organization = session.get(Organization, UUID(source_record.raw_payload.get("organization_id", "")))
+            except (ValueError, TypeError):
+                organization = None
+        normalized = f"{' '.join(item['name'].casefold().split())}::osm::{external_id}"
+        if organization is None:
+            organization = session.scalar(select(Organization).where(
+                Organization.normalized_name == normalized,
+                Organization.country_code == "ZA",
+            ))
+        if organization is None:
+            organization = Organization(
+                canonical_name=item["name"], normalized_name=normalized, country_code="ZA",
+                business_category=payload.category, province=item["province"],
+                municipality=payload.locality, locality=item["locality"],
+                website_domain=item["website_domain"],
+            )
+            session.add(organization)
+            session.flush()
+        else:
+            organization.business_category = payload.category
+            organization.province = item["province"] or organization.province
+            organization.municipality = payload.locality or organization.municipality
+            organization.locality = item["locality"] or organization.locality
+            organization.website_domain = item["website_domain"] or organization.website_domain
+
+        lead = session.scalar(select(LeadRow).where(
+            LeadRow.tenant_id == DEFAULT_TENANT_ID,
+            LeadRow.campaign_id == campaign.id,
+            LeadRow.organization_id == organization.id,
+        ))
+        evidence_note = "Named business feature present in OpenStreetMap; CIPC registration and current trading status are not implied."
+        if lead is None:
+            lead = LeadRow(
+                tenant_id=DEFAULT_TENANT_ID, campaign_id=campaign.id,
+                organization_id=organization.id, lead_type=campaign.lead_type,
+                status="new", score=30, qualification_reason=evidence_note,
+                verification_status="source_confirmed",
+                verification_source="OpenStreetMap",
+                verified_at=now,
+            )
+            session.add(lead)
+            session.flush()
+            inserted += 1
+        else:
+            lead.last_seen_at = now
+            lead.verification_status = "source_confirmed"
+            lead.verification_source = "OpenStreetMap"
+            lead.verified_at = now
+            lead.qualification_reason = evidence_note
+            updated += 1
+
+        evidence = session.scalar(select(SourceRecord).where(
+            SourceRecord.source_id == source.id,
+            SourceRecord.external_id == str(lead.id),
+        ))
+        evidence_payload = {
+            "lead_id": str(lead.id), "osm_external_id": external_id,
+            "organization_id": str(organization.id), "category": payload.category,
+            "tags": item["tags"], "website_domain": item["website_domain"],
+            "attribution": OSM_ATTRIBUTION,
+        }
+        if evidence is None:
+            session.add(SourceRecord(
+                source_id=source.id, external_id=str(lead.id), record_type="lead_evidence",
+                source_url=item["source_url"], source_updated_at=item["source_updated_at"],
+                raw_payload=evidence_payload,
+            ))
+        else:
+            evidence.source_url = item["source_url"]
+            evidence.source_updated_at = item["source_updated_at"]
+            evidence.raw_payload = evidence_payload
+
+        if source_record is None:
+            session.add(SourceRecord(
+                source_id=source.id, external_id=external_id, record_type="osm_business",
+                source_url=item["source_url"], source_updated_at=item["source_updated_at"],
+                raw_payload={"organization_id": str(organization.id), "tags": item["tags"]},
+            ))
+        else:
+            source_record.source_url = item["source_url"]
+            source_record.source_updated_at = item["source_updated_at"]
+            source_record.raw_payload = {"organization_id": str(organization.id), "tags": item["tags"]}
+
+    source.last_synced_at = now
+    source.last_error = None
+    session.commit()
+    return {
+        "source": OSM_SOURCE, "attribution": OSM_ATTRIBUTION,
+        "licence": "Open Database License (ODbL) 1.0",
+        "location": payload.locality, "province": payload.province,
+        "category": payload.category, "radius_m": payload.radius_m,
+        "matched": len(businesses), "inserted": inserted, "updated": updated, "skipped": skipped,
+        "verification_status": "source_confirmed",
+        "verification_scope": "Present as a named business feature in OpenStreetMap at import time; not CIPC registration or proof of current trading.",
+    }
 
 
 @app.get("/api/v1/consumer-enquiries/status")
@@ -593,6 +840,186 @@ def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
         evidence.source_url=payload.source_url; evidence.raw_payload={"lead_id":str(row.id),"source_external_id":payload.external_id,"evidence_note":payload.evidence_note}
     session.commit(); session.refresh(row)
     return get_leads(q=payload.organization,lead_type=None,session=session)[0]
+@app.post("/api/v1/opportunities/import/official/batch")
+def import_official_opportunity_batch(payload: OfficialBatchImportWrite, session: Session = Depends(get_session)):
+    source = session.scalar(select(SourceRegistry).where(
+        SourceRegistry.name == "National Treasury eTender Transparency Portal"
+    ))
+    if source is None or not source.enabled or source.permitted_use != "approved":
+        raise HTTPException(status_code=409, detail="Approve the National Treasury eTender source before importing.")
+    import urllib.error, urllib.parse, urllib.request
+
+    totals = {"inserted": 0, "updated": 0, "unchanged": 0, "stale_releases": 0, "duplicates_in_input": 0, "skipped": 0}
+    pages_imported = releases_received = 0
+    next_page = payload.start_page
+    warning = None
+    for page in range(payload.start_page, payload.start_page + payload.page_count):
+        params = {
+            "PageNumber": page, "PageSize": payload.page_size,
+            "dateFrom": payload.date_from.isoformat(), "dateTo": payload.date_to.isoformat(),
+        }
+        request = urllib.request.Request(
+            "https://ocds-api.etenders.gov.za/api/OCDSReleases?" + urllib.parse.urlencode(params),
+            headers={"Accept": "application/json", "User-Agent": "Arletion/0.2 (National Treasury OCDS import)"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                raw = response.read(20_000_001)
+            if len(raw) > 20_000_000:
+                raise ValueError("Official API response exceeded the 20 MB safety limit.")
+            records = parse_import(raw.decode("utf-8-sig"), "json")
+        except urllib.error.HTTPError as error:
+            warning = f"Official eTender API returned HTTP {error.code} on page {page}."
+            break
+        except (urllib.error.URLError, TimeoutError) as error:
+            warning = f"Official eTender API was unreachable on page {page} ({error.__class__.__name__})."
+            break
+        except (UnicodeDecodeError, ValueError) as error:
+            warning = f"Official eTender page {page} could not be parsed ({error.__class__.__name__})."
+            break
+        if not records:
+            next_page = page
+            break
+        result = import_opportunities(session, records)
+        for key in totals:
+            totals[key] += result[key]
+        pages_imported += 1
+        releases_received += len(records)
+        next_page = page + 1
+        if len(records) < payload.page_size:
+            break
+
+    if warning and pages_imported == 0:
+        raise HTTPException(status_code=502, detail=warning)
+    return {
+        **totals, "source": "National Treasury eTender Transparency Portal",
+        "pages_imported": pages_imported, "releases_received": releases_received,
+        "next_page": next_page, "warning": warning,
+        "has_more": pages_imported == payload.page_count and warning is None and releases_received == pages_imported * payload.page_size,
+    }
+
+
+@app.post("/api/v1/leads/import/etender-awarded-suppliers")
+def import_etender_awarded_suppliers(payload: EtenderAwardSupplierImportWrite, session: Session = Depends(get_session)):
+    source = session.get(SourceRegistry, ETENDERS_SOURCE_ID) or session.scalar(
+        select(SourceRegistry).where(SourceRegistry.name == "National Treasury eTender Transparency Portal")
+    )
+    if source is None or not source.enabled or source.permitted_use != "approved":
+        raise HTTPException(status_code=409, detail="Approve the official National Treasury eTender source before importing awarded suppliers.")
+    campaign = session.scalar(select(CampaignRow).where(
+        CampaignRow.id == payload.campaign_id,
+        CampaignRow.tenant_id == DEFAULT_TENANT_ID,
+    ))
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Business or procurement campaign not found.")
+    if campaign.lead_type not in {"business", "procurement", "partnership"}:
+        raise HTTPException(status_code=409, detail="Awarded suppliers must use a business, procurement or partnership campaign.")
+    releases = session.scalars(
+        select(SourceRecord).where(
+            SourceRecord.source_id == source.id,
+            SourceRecord.record_type == "ocds_release",
+        ).order_by(SourceRecord.source_updated_at.desc().nullslast(), SourceRecord.observed_at.desc())
+        .limit(payload.max_releases)
+    ).all()
+    suppliers = {}
+    skipped = 0
+    for release in releases:
+        raw = release.raw_payload if isinstance(release.raw_payload, dict) else {}
+        items = extract_awarded_business_suppliers(raw, release.source_url, release.source_updated_at)
+        if not items:
+            skipped += 1
+        for item in items:
+            # Prefer the most recently published award evidence for a supplier.
+            prior = suppliers.get(item["supplier_key"].casefold())
+            if prior is None or (item["source_updated_at"] and (
+                prior["source_updated_at"] is None or item["source_updated_at"] > prior["source_updated_at"]
+            )):
+                suppliers[item["supplier_key"].casefold()] = item
+
+    now = datetime.now(timezone.utc)
+    inserted = updated = 0
+    for item in suppliers.values():
+        normalized = f"{' '.join(item['name'].casefold().split())}::etender::{item['supplier_key'].casefold()}"
+        organization = session.scalar(select(Organization).where(
+            Organization.normalized_name == normalized,
+            Organization.country_code == "ZA",
+        ))
+        if organization is None:
+            organization = Organization(
+                canonical_name=item["name"], normalized_name=normalized, country_code="ZA",
+                business_category=item["category"],
+            )
+            session.add(organization)
+            session.flush()
+        elif item["category"] and item["category"] != "Government supplier":
+            organization.business_category = item["category"]
+
+        lead = session.scalar(select(LeadRow).where(
+            LeadRow.tenant_id == DEFAULT_TENANT_ID,
+            LeadRow.campaign_id == campaign.id,
+            LeadRow.organization_id == organization.id,
+        ))
+        reason = (
+            f"Named as an award supplier in National Treasury OCDS release {item['ocid']} "
+            f"(award {item['award_id'] or 'ID not supplied'}). Confirm current CSD status before outreach."
+        )
+        if lead is None:
+            lead = LeadRow(
+                tenant_id=DEFAULT_TENANT_ID, campaign_id=campaign.id,
+                organization_id=organization.id, lead_type=campaign.lead_type,
+                status="new", score=55, qualification_reason=reason,
+                verification_status="source_confirmed",
+                verification_source="National Treasury eTender OCDS award",
+                verified_at=now,
+            )
+            session.add(lead)
+            session.flush()
+            inserted += 1
+        else:
+            lead.last_seen_at = now
+            lead.verification_status = "source_confirmed"
+            lead.verification_source = "National Treasury eTender OCDS award"
+            lead.verified_at = now
+            lead.qualification_reason = reason
+            updated += 1
+
+        evidence = session.scalar(select(SourceRecord).where(
+            SourceRecord.source_id == source.id,
+            SourceRecord.external_id == str(lead.id),
+            SourceRecord.record_type == "lead_evidence",
+        ))
+        evidence_payload = {
+            "lead_id": str(lead.id),
+            "supplier_identifier": item["supplier_key"],
+            "ocid": item["ocid"],
+            "award_id": item["award_id"],
+            "tender_title": item["tender_title"],
+            "source_evidence": item["source_evidence"],
+        }
+        if evidence is None:
+            session.add(SourceRecord(
+                source_id=source.id, external_id=str(lead.id), record_type="lead_evidence",
+                source_url=item["source_url"], source_updated_at=item["source_updated_at"],
+                raw_payload=evidence_payload,
+            ))
+        else:
+            evidence.source_url = item["source_url"]
+            evidence.source_updated_at = item["source_updated_at"]
+            evidence.raw_payload = evidence_payload
+
+    session.commit()
+    return {
+        "source": "National Treasury eTender Transparency Portal",
+        "matched_releases": len(releases),
+        "unique_awarded_companies": len(suppliers),
+        "inserted": inserted,
+        "updated": updated,
+        "skipped_releases_without_company_awards": skipped,
+        "verification_status": "source_confirmed",
+        "verification_scope": "Named as a company-form supplier in a published OCDS award; current CSD registration, tax status and trading activity are not implied.",
+    }
+
+
 @app.get("/api/v1/sources", response_model=list[Source])
 def get_sources(session: Session = Depends(get_session)):
     result=[]

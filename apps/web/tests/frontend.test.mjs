@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import test from "node:test";
-import { createCampaign, loadConsumerPage, loadConsumerStatus, loadDashboardData, loadLeadPage } from "../app/dashboard-api.mjs";
+import { createCampaign, importOpenStreetMapBusinesses, loadConsumerPage, loadConsumerStatus, loadDashboardData, loadLeadPage } from "../app/dashboard-api.mjs";
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const monorepoRoot = resolve(webRoot, "../..");
@@ -71,13 +71,17 @@ test("production dashboard uses the protected same-origin API proxy", async () =
   assert.match(render, /sync: false/);
 });
 
-test("opportunities page offers a date-bounded official import", async () => {
+test("opportunities page offers bounded, resumable official Treasury imports", async () => {
   const page = await read("app/page.tsx");
-  assert.match(page, /Import official eTender page/);
+  const api = await read("app/dashboard-api.mjs");
+  assert.match(page, /Import next eTender pages/);
   assert.match(page, /Approve source first/);
   assert.match(page, /approveSource/);
   assert.match(page, /date_from:dateFrom/);
   assert.match(page, /date_to:dateTo/);
+  assert.match(page, /treasuryStartPage/);
+  assert.match(api, /importOfficialOpportunityPages/);
+  assert.match(api, /official\/batch/);
   assert.ok(page.includes("setReloadKey(value=>value+1)"));
 });
 
@@ -107,7 +111,7 @@ test("lead search sends category, type, status and pagination filters to the API
   let requestedUrl = "";
   const result = await loadLeadPage("http://127.0.0.1:8000", {
     q: "Witbank", lead_type: "business", category: "Construction",
-    status: "qualified", province: "Mpumalanga", page: 2, page_size: 10,
+    status: "qualified", province: "Mpumalanga", verification_status: "source_confirmed", page: 2, page_size: 10,
   }, async (url, options) => {
     requestedUrl = url;
     assert.ok(options.signal instanceof AbortSignal);
@@ -121,6 +125,7 @@ test("lead search sends category, type, status and pagination filters to the API
   assert.equal(parsed.searchParams.get("lead_type"), "business");
   assert.equal(parsed.searchParams.get("status"), "qualified");
   assert.equal(parsed.searchParams.get("province"), "Mpumalanga");
+  assert.equal(parsed.searchParams.get("verification_status"), "source_confirmed");
   assert.equal(parsed.searchParams.get("page"), "2");
   assert.equal(result.total, 0);
 });
@@ -186,6 +191,44 @@ test("dashboard renders separate protected consumer enquiry and business campaig
   assert.match(page, /Consumer intake is safely disabled/);
   assert.match(page, /marketing_consent/);
   assert.doesNotMatch(page, /full_name|phone_ciphertext|email_ciphertext/);
+});
+
+test("OpenStreetMap import posts the selected locality and does not invent verification", async () => {
+  let request;
+  const result = await importOpenStreetMapBusinesses("http://127.0.0.1:8000", {
+    campaign_id: "campaign-1", category: "Construction", locality: "eMalahleni",
+    province: "Mpumalanga", latitude: -25.8762, longitude: 29.21,
+    radius_m: 10000, limit: 100,
+  }, async (url, options) => {
+    request = { url, options };
+    return { ok: true, json: async () => ({
+      source: "OpenStreetMap Business Directory", attribution: "© OpenStreetMap contributors · ODbL 1.0",
+      licence: "ODbL", location: "eMalahleni", province: "Mpumalanga",
+      category: "Construction", radius_m: 10000, matched: 1, inserted: 1,
+      updated: 0, skipped: 0, verification_status: "source_confirmed",
+      verification_scope: "Map record only",
+    }) };
+  });
+  assert.ok(request.url.endsWith("/api/v1/leads/import/openstreetmap"));
+  assert.equal(request.options.method, "POST");
+  assert.equal(JSON.parse(request.options.body).campaign_id, "campaign-1");
+  assert.equal(result.verification_status, "source_confirmed");
+  assert.equal(result.inserted, 1);
+});
+
+test("OpenStreetMap UI labels mapped records as source-confirmed, not CIPC verified", async () => {
+  const page = await read("app/page.tsx");
+  assert.match(page, /Find free local businesses/);
+  assert.match(page, /OpenStreetMap business discovery/);
+  assert.match(page, /Source-confirmed/);
+  assert.match(page, /not CIPC or trading-status verification/);
+  assert.match(page, /ODbL licence and attribution/);
+  assert.match(page, /importOpenStreetMapBusinesses/);
+  assert.match(page, /Government-awarded suppliers/);
+  assert.match(page, /Import awarded companies as leads/);
+  assert.match(page, /Check CSD/);
+  assert.match(page, /Record CSD\/CIPC check/);
+  assert.match(page, /recordManualVerification/);
 });
 
 test("dashboard data loader reports unavailable or failing API requests", async () => {

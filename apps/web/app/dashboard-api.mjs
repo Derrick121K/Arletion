@@ -36,10 +36,10 @@ export async function loadDashboardData(apiBaseUrl, fetcher = fetch, timeoutMs =
   };
 }
 
-/** @param {string} apiBaseUrl @param {{q?:string,lead_type?:string,category?:string,status?:string,province?:string,page?:number,page_size?:number}} filters @param {typeof fetch} fetcher */
+/** @param {string} apiBaseUrl @param {{q?:string,lead_type?:string,category?:string,status?:string,province?:string,verification_status?:string,page?:number,page_size?:number}} filters @param {typeof fetch} fetcher */
 export async function loadLeadPage(apiBaseUrl, filters = {}, fetcher = fetch) {
   const params = new URLSearchParams({ page: String(filters.page ?? 1), page_size: String(filters.page_size ?? 25) });
-  for (const key of ["q", "lead_type", "category", "status", "province"]) {
+  for (const key of ["q", "lead_type", "category", "status", "province", "verification_status"]) {
     const value = filters[key];
     if (value) params.set(key, value);
   }
@@ -78,4 +78,64 @@ export async function createCampaign(apiBaseUrl, campaign, fetcher = fetch) {
     throw new Error(typeof payload.detail === "string" ? payload.detail : `Campaign creation failed with HTTP ${response.status}.`);
   }
   return response.json();
+}
+
+
+/** @param {string} apiBaseUrl @param {{campaign_id:string,category:string,locality:string,province:string,latitude:number,longitude:number,radius_m:number,limit:number}} request @param {typeof fetch} fetcher */
+export async function importOpenStreetMapBusinesses(apiBaseUrl, request, fetcher = fetch) {
+  const response = await fetcher(`${apiBaseUrl}/api/v1/leads/import/openstreetmap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(60000),
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : `OpenStreetMap import failed with HTTP ${response.status}.`);
+  return payload;
+}
+
+
+/** @param {string} apiBaseUrl @param {{campaign_id:string,max_releases:number}} request @param {typeof fetch} fetcher */
+export async function importEtenderAwardedSuppliers(apiBaseUrl, request, fetcher = fetch) {
+  const response = await fetcher(`${apiBaseUrl}/api/v1/leads/import/etender-awarded-suppliers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(60000),
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : `Treasury supplier import failed with HTTP ${response.status}.`);
+  return payload;
+}
+
+
+/** @param {string} apiBaseUrl @param {{start_page:number,page_size:number,page_count:number,date_from:string,date_to:string}} request @param {typeof fetch} fetcher */
+export async function importOfficialOpportunityPages(apiBaseUrl, request, fetcher = fetch) {
+  const response = await fetcher(`${apiBaseUrl}/api/v1/opportunities/import/official/batch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+    signal: AbortSignal.timeout(85000),
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : `Treasury import failed with HTTP ${response.status}.`);
+  return payload;
+}
+
+
+/** @param {string} apiBaseUrl @param {string} leadId @param {{registry:"CSD"|"CIPC",result:"verified"|"not_found"|"inactive"|"restricted"|"unknown",evidence_url:string,reference:string,note?:string,checked_at:string}} payload @param {typeof fetch} fetcher */
+export async function recordLeadVerification(apiBaseUrl, leadId, payload, fetcher = fetch) {
+  const response = await fetcher(`${apiBaseUrl}/api/v1/leads/${encodeURIComponent(leadId)}/verification`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(20000),
+    cache: "no-store",
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : `Verification record failed with HTTP ${response.status}.`);
+  return result;
 }

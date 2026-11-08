@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +11,8 @@ from cryptography.fernet import Fernet
 from app.database import engine_for_url, normalize_database_url
 from app.main import app
 from app.models import Base
-from app.procurement import normalize_record, parse_import
+from app.procurement import extract_awarded_business_suppliers, normalize_record, parse_import
+from app.business_sources import OSM_ATTRIBUTION, normalize_osm_businesses, overpass_query
 
 
 def api_request(method: str, path: str, **kwargs):
@@ -140,8 +142,9 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         with self.engine.begin() as connection:
             # Keep migration-seeded reference rows; clear tenant-owned/test data.
             connection.execute(text("TRUNCATE TABLE audit_events, suppression_records, consent_records, evidence_items, consumer_enquiries, leads, opportunities, source_records, campaigns, organizations RESTART IDENTITY CASCADE"))
-            connection.execute(text("DELETE FROM source_registry WHERE id <> '00000000-0000-0000-0000-000000000002'"))
+            connection.execute(text("DELETE FROM source_registry WHERE id NOT IN ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003')"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL WHERE id = '00000000-0000-0000-0000-000000000002'"))
+            connection.execute(text("UPDATE source_registry SET permitted_use = 'approved', enabled = TRUE, last_error = NULL, last_synced_at = NULL WHERE id = '00000000-0000-0000-0000-000000000003'"))
 
     def test_source_can_be_explicitly_approved_after_manual_review(self):
         response = api_request(
@@ -254,6 +257,304 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             "source_url": "https://source.example/1", "status": "hacked",
         })
         self.assertEqual(invalid_status.status_code, 422)
+
+    def test_award_supplier_extractor_only_keeps_company_form_entities(self):
+        release = {
+            "ocid": "ocds-9t57fa-award-1",
+            "tender": {"title": "Road maintenance", "classification": {"description": "Construction"}},
+            "awards": [{
+                "id": "award-1",
+                "suppliers": [
+                    {"id": "CSD-12345", "name": "Mpumalanga Infrastructure (Pty) Ltd"},
+                    {"id": "person-1", "name": "John Smith"},
+                ],
+            }],
+        }
+        suppliers = extract_awarded_business_suppliers(
+            release, "https://data.etenders.gov.za/notice/award-1", None,
+        )
+        self.assertEqual(len(suppliers), 1)
+        self.assertEqual(suppliers[0]["supplier_key"], "CSD-12345")
+        self.assertEqual(suppliers[0]["name"], "Mpumalanga Infrastructure (Pty) Ltd")
+        self.assertEqual(suppliers[0]["category"], "Construction")
+        self.assertEqual(suppliers[0]["ocid"], "ocds-9t57fa-award-1")
+
+    def test_treasury_awarded_supplier_import_creates_source_confirmed_business_records(self):
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_registry SET permitted_use='approved', enabled=TRUE "
+                "WHERE id='00000000-0000-0000-0000-000000000002'"
+            ))
+        release = {
+            "ocid": "ocds-9t57fa-awarded-supplier",
+            "id": "release-award-1",
+            "date": "2026-10-20T10:00:00Z",
+            "tender": {
+                "title": "eMalahleni road maintenance",
+                "classification": {"description": "Construction"},
+            },
+            "awards": [{
+                "id": "award-99",
+                "suppliers": [
+                    {"id": "CSD-998877", "name": "Mpumalanga Infrastructure (Pty) Ltd"},
+                    {"id": "person-1", "name": "John Smith"},
+                ],
+            }],
+        }
+        with self.engine.begin() as connection:
+            connection.execute(text("""
+                INSERT INTO source_records (
+                    id, source_id, external_id, record_type, source_url, raw_payload
+                ) VALUES (
+                    '00000000-0000-0000-0000-000000000099',
+                    '00000000-0000-0000-0000-000000000002',
+                    'ocds-9t57fa-awarded-supplier#release-award-1',
+                    'ocds_release',
+                    'https://data.etenders.gov.za/notice/award-99',
+                    CAST(:payload AS jsonb)
+                )
+            """), {"payload": __import__("json").dumps(release)})
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Treasury awarded suppliers", "objective": "Review suppliers named in public awards",
+            "lead_type": "procurement", "geography": "South Africa",
+        })
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        body = {"campaign_id": campaign.json()["id"], "max_releases": 100}
+        first = api_request("POST", "/api/v1/leads/import/etender-awarded-suppliers", json=body)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["unique_awarded_companies"], 1)
+        self.assertEqual(first.json()["inserted"], 1)
+        self.assertEqual(first.json()["verification_status"], "source_confirmed")
+        self.assertIn("CSD registration", first.json()["verification_scope"])
+
+        result = api_request("GET", "/api/v1/leads/search", params={
+            "lead_type": "procurement", "verification_status": "source_confirmed",
+        })
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["total"], 1)
+        lead = result.json()["items"][0]
+        self.assertEqual(lead["organization"], "Mpumalanga Infrastructure (Pty) Ltd")
+        self.assertEqual(lead["source"], "National Treasury eTender Transparency Portal")
+        self.assertEqual(lead["source_url"], "https://data.etenders.gov.za/notice/award-99")
+        self.assertEqual(lead["verification_source"], "National Treasury eTender OCDS award")
+        self.assertNotIn("John Smith", str(result.json()))
+
+        second = api_request("POST", "/api/v1/leads/import/etender-awarded-suppliers", json=body)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["inserted"], 0)
+        self.assertEqual(second.json()["updated"], 1)
+        self.assertEqual(api_request("GET", "/api/v1/leads/search", params={
+            "lead_type": "procurement", "verification_status": "source_confirmed",
+        }).json()["total"], 1)
+
+    def test_manual_csd_cipc_verification_requires_official_evidence_and_is_audited(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Supplier verification", "objective": "Review official supplier status",
+            "lead_type": "business",
+        }).json()
+        created = api_request("POST", "/api/v1/leads", json={
+            "campaign_id": campaign["id"], "organization": "Verification Test Supplies (Pty) Ltd",
+            "lead_type": "business", "category": "Construction", "source": "Test source",
+            "source_url": "https://source.example/record",
+        })
+        self.assertEqual(created.status_code, 201, created.text)
+        lead_id = created.json()["id"]
+        bad_host = api_request("POST", f"/api/v1/leads/{lead_id}/verification", json={
+            "registry": "CSD", "result": "verified",
+            "evidence_url": "https://example.com/fake-csd-record",
+            "reference": "SUP-12345", "checked_at": "2026-11-08T13:00:00+02:00",
+        })
+        self.assertEqual(bad_host.status_code, 422)
+
+        verified = api_request("POST", f"/api/v1/leads/{lead_id}/verification", json={
+            "registry": "CSD", "result": "verified",
+            "evidence_url": "https://secure.csd.gov.za/supplier/verified-record",
+            "reference": "MAAA1234567", "note": "Supplier status checked manually by operator.",
+            "checked_at": "2026-11-08T13:00:00+02:00",
+        })
+        self.assertEqual(verified.status_code, 200, verified.text)
+        self.assertEqual(verified.json()["verification_status"], "officially_verified")
+        self.assertEqual(verified.json()["verification_source"], "CSD manual registry check")
+
+        result = api_request("GET", "/api/v1/leads/search", params={
+            "verification_status": "officially_verified",
+        })
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["total"], 1)
+        self.assertEqual(result.json()["items"][0]["verification_source"], "CSD manual registry check")
+
+        with self.engine.connect() as connection:
+            event = connection.execute(text(
+                "SELECT action, metadata FROM audit_events WHERE entity_id = :lead_id"
+            ), {"lead_id": lead_id}).one()
+        self.assertEqual(event.action, "lead.registry_verification.recorded")
+        self.assertEqual(event.metadata["registry"], "CSD")
+        self.assertEqual(event.metadata["reference"], "MAAA1234567")
+
+
+    def test_official_batch_import_fetches_sequential_pages_and_returns_resume_cursor(self):
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_registry SET permitted_use='approved', enabled=TRUE "
+                "WHERE id='00000000-0000-0000-0000-000000000002'"
+            ))
+        releases = [
+            {"ocid": "ocds-9t57fa-batch-1", "id": "release-1", "date": "2026-10-25T10:00:00Z",
+             "tender": {"title": "Road maintenance 1", "status": "active"}},
+            {"ocid": "ocds-9t57fa-batch-2", "id": "release-2", "date": "2026-10-26T10:00:00Z",
+             "tender": {"title": "Road maintenance 2", "status": "active"}},
+        ]
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self.payload = payload
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self, limit):
+                return __import__("json").dumps({"releases": [self.payload]}).encode()
+
+        calls = []
+        def fake_urlopen(request, timeout):
+            calls.append(request.full_url)
+            return FakeResponse(releases[len(calls) - 1])
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            response = api_request("POST", "/api/v1/opportunities/import/official/batch", json={
+                "start_page": 7, "page_size": 1, "page_count": 2,
+                "date_from": "2026-10-01", "date_to": "2026-11-08",
+            })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("PageNumber=7", calls[0])
+        self.assertIn("PageNumber=8", calls[1])
+        self.assertEqual(response.json()["pages_imported"], 2)
+        self.assertEqual(response.json()["releases_received"], 2)
+        self.assertEqual(response.json()["inserted"], 2)
+        self.assertEqual(response.json()["next_page"], 9)
+        self.assertTrue(response.json()["has_more"])
+
+        invalid = api_request("POST", "/api/v1/opportunities/import/official/batch", json={
+            "start_page": 1, "page_size": 100, "page_count": 5,
+            "date_from": "2026-10-01", "date_to": "2026-11-08",
+        })
+        self.assertEqual(invalid.status_code, 422)
+
+
+    def test_openstreetmap_query_is_category_scoped_and_bounded(self):
+        query = overpass_query("Construction", -25.8762, 29.21, 10000, 100)
+        self.assertIn("around:10000,-25.876200,29.210000", query)
+        self.assertIn('"shop"~"^(building_materials|hardware|trade|doityourself)$",i', query)
+        self.assertIn('"craft"~"', query)
+        self.assertTrue(query.endswith("out center meta 100;"))
+        with self.assertRaises(ValueError):
+            overpass_query("Unknown", -25.8762, 29.21, 10000, 100)
+
+    def test_openstreetmap_normalizer_keeps_only_named_business_evidence(self):
+        rows = normalize_osm_businesses({
+            "elements": [
+                {
+                    "type": "node", "id": 123, "lat": -25.8762, "lon": 29.21,
+                    "timestamp": "2026-11-08T09:00:00Z",
+                    "tags": {
+                        "name": "Witbank Building Supplies", "shop": "building_materials",
+                        "website": "https://www.example.co.za/contact",
+                        "contact:phone": "+27130000000", "contact:email": "owner@example.test",
+                        "addr:suburb": "CBD",
+                    },
+                },
+                {"type": "node", "id": 124, "tags": {"shop": "hardware"}},
+                {"type": "way", "id": 123, "tags": {"name": "Witbank Building Supplies", "shop": "hardware"}},
+            ]
+        }, "Building materials", "eMalahleni", "Mpumalanga")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["external_id"], "node/123")
+        self.assertEqual(rows[0]["source_url"], "https://www.openstreetmap.org/node/123")
+        self.assertEqual(rows[0]["website_domain"], "www.example.co.za")
+        self.assertEqual(rows[0]["locality"], "CBD")
+        self.assertEqual(rows[0]["province"], "Mpumalanga")
+        self.assertEqual(rows[0]["tags"], {"shop": "building_materials", "addr:suburb": "CBD"})
+        self.assertNotIn("contact:phone", rows[0]["tags"])
+        self.assertNotIn("contact:email", rows[0]["tags"])
+        self.assertEqual(OSM_ATTRIBUTION, "© OpenStreetMap contributors · ODbL 1.0")
+
+    def test_openstreetmap_import_creates_source_confirmed_leads_and_updates_existing_rows(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "eMalahleni building suppliers", "objective": "Find local building suppliers",
+            "lead_type": "business", "geography": "eMalahleni, Mpumalanga",
+        })
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        business = {
+            "external_id": "node/123456", "name": "Witbank Building Supplies",
+            "category": "Building materials", "locality": "eMalahleni", "province": "Mpumalanga",
+            "website_domain": "www.example.co.za", "latitude": -25.8762, "longitude": 29.21,
+            "source_url": "https://www.openstreetmap.org/node/123456",
+            "source_updated_at": None,
+            "tags": {"shop": "building_materials"},
+        }
+        body = {
+            "campaign_id": campaign.json()["id"], "category": "Building materials",
+            "locality": "eMalahleni", "province": "Mpumalanga",
+            "latitude": -25.8762, "longitude": 29.21, "radius_m": 10000, "limit": 50,
+        }
+        with patch("app.main.fetch_osm_businesses", return_value=[business]) as fetch:
+            first = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["inserted"], 1)
+        self.assertEqual(first.json()["verification_status"], "source_confirmed")
+        self.assertIn("not CIPC registration", first.json()["verification_scope"])
+        fetch.assert_called_once_with("Building materials", -25.8762, 29.21, 10000, "eMalahleni", "Mpumalanga", 50)
+
+        leads = api_request("GET", "/api/v1/leads/search", params={
+            "category": "Building materials", "verification_status": "source_confirmed",
+        })
+        self.assertEqual(leads.status_code, 200, leads.text)
+        self.assertEqual(leads.json()["total"], 1)
+        item = leads.json()["items"][0]
+        self.assertEqual(item["organization"], "Witbank Building Supplies")
+        self.assertEqual(item["source"], "OpenStreetMap Business Directory")
+        self.assertEqual(item["source_url"], "https://www.openstreetmap.org/node/123456")
+        self.assertEqual(item["verification_status"], "source_confirmed")
+        self.assertEqual(item["verification_source"], "OpenStreetMap")
+        self.assertEqual(item["website_url"], "https://www.example.co.za")
+        self.assertNotIn("phone", item)
+        self.assertNotIn("email", item)
+
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_registry SET last_synced_at = NULL WHERE name = 'OpenStreetMap Business Directory'"
+            ))
+        with patch("app.main.fetch_osm_businesses", return_value=[business]):
+            second = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["inserted"], 0)
+        self.assertEqual(second.json()["updated"], 1)
+        self.assertEqual(api_request("GET", "/api/v1/leads/search", params={
+            "category": "Building materials", "verification_status": "source_confirmed",
+        }).json()["total"], 1)
+
+    def test_openstreetmap_import_blocks_wrong_campaign_and_applies_rate_limit(self):
+        procurement = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Tender opportunities", "objective": "Procurement", "lead_type": "procurement",
+        }).json()
+        body = {
+            "campaign_id": procurement["id"], "category": "Construction",
+            "latitude": -25.8762, "longitude": 29.21,
+        }
+        wrong = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+        self.assertEqual(wrong.status_code, 409)
+
+        business = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Construction businesses", "objective": "Business outreach", "lead_type": "business",
+        }).json()
+        body["campaign_id"] = business["id"]
+        with patch("app.main.fetch_osm_businesses", return_value=[]):
+            first = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+            limited = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["matched"], 0)
+        self.assertEqual(limited.status_code, 429)
 
     def test_consumer_intake_is_disabled_until_storage_and_encryption_are_approved(self):
         with patch.dict(os.environ, {

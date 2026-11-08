@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 from datetime import date, datetime, timezone
 from urllib.parse import urlsplit
 from typing import Any, Iterable
@@ -235,3 +236,52 @@ def import_opportunities(session: Session, records: Iterable[dict[str, Any]]) ->
     session.commit()
     return {"inserted": inserted, "updated": updated, "unchanged": unchanged, "stale_releases": stale,
             "duplicates_in_input": duplicates, "skipped": skipped}
+
+_SA_COMPANY_SUFFIXES = (
+    " (PTY) LTD", " (PTY) LIMITED", " PTY LTD", " PTY LIMITED",
+    " PROPRIETARY LIMITED", " LIMITED", " LTD", " CLOSE CORPORATION",
+    " CC", " INCORPORATED", " INC", " SOC LTD", " NPC",
+    " NON-PROFIT COMPANY", " CO-OPERATIVE", " COOPERATIVE",
+)
+
+def extract_awarded_business_suppliers(release: dict[str, Any], source_url: str, observed_at: datetime | None) -> list[dict[str, Any]]:
+    """Extract only business-form supplier names from published OCDS awards."""
+    tender = release.get("tender") if isinstance(release.get("tender"), dict) else {}
+    classification = tender.get("classification") if isinstance(tender.get("classification"), dict) else {}
+    category = str(classification.get("description") or tender.get("mainProcurementCategory") or "Government supplier")[:120]
+    ocid = str(release.get("ocid") or "")
+    result = []
+    seen = set()
+    for award in release.get("awards", []) if isinstance(release.get("awards"), list) else []:
+        if not isinstance(award, dict):
+            continue
+        award_id = str(award.get("id") or "")
+        for supplier in award.get("suppliers", []) if isinstance(award.get("suppliers"), list) else []:
+            if not isinstance(supplier, dict):
+                continue
+            name = " ".join(str(supplier.get("name") or "").split())
+            if not name or not any(name.upper().rstrip(" .").endswith(suffix) for suffix in _SA_COMPANY_SUFFIXES):
+                continue
+            identifier = supplier.get("id")
+            if isinstance(identifier, dict):
+                identifier = identifier.get("id") or identifier.get("legalName")
+            if not identifier and isinstance(supplier.get("identifier"), dict):
+                identifier = supplier["identifier"].get("id")
+            key = str(identifier or " ".join(name.casefold().split()))
+            dedupe = (key.casefold(), award_id)
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            result.append({
+                "supplier_key": key,
+                "name": name[:300],
+                "category": category,
+                "ocid": ocid,
+                "award_id": award_id,
+                "tender_title": str(tender.get("title") or "")[:500],
+                "source_url": source_url,
+                "source_updated_at": observed_at,
+                "source_evidence": "Named as supplier in a published National Treasury OCDS award.",
+            })
+    return result
+
