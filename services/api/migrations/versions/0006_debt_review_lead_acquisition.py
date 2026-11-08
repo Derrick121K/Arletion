@@ -4,7 +4,6 @@ Revision ID: 0006_debt_review_lead_acquisition
 Revises: 0005_free_osm_business_sources
 """
 from alembic import op
-import sqlalchemy as sa
 
 revision = "0006_debt_review_lead_acquisition"
 down_revision = "0005_free_osm_business_sources"
@@ -18,7 +17,7 @@ def upgrade() -> None:
         "consumer_enquiry_category_check", "consumer_enquiries",
         "category IN ('debt_counselling','debt_review_information','considering_debt_review','already_under_review','application_pending','debt_review_assistance','completed_debt_review','budget_guidance','general')",
     )
-    op.execute("""
+    op.get_bind().exec_driver_sql("""
         INSERT INTO source_registry (
             id, name, base_url, source_type, licence_reference, permitted_use, enabled,
             rate_limit_config, retention_config
