@@ -186,6 +186,69 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         source2 = api_request("POST", "/api/v1/sources", json=source_body)
         self.assertEqual(source1.json()["id"], source2.json()["id"])
 
+    def test_lead_categories_filters_and_pagination_are_database_backed(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Category filter test", "objective": "Verify lead filters", "lead_type": "business"
+        }).json()
+        common = {
+            "campaign_id": campaign["id"], "lead_type": "business",
+            "location": "eMalahleni", "source": "Approved test source",
+            "source_url": "https://source.example/records", "status": "new",
+        }
+        first = api_request("POST", "/api/v1/leads", json={
+            **common, "organization": "Mpumalanga Builders", "category": "Construction",
+            "evidence_note": "Published business directory record",
+        })
+        second = api_request("POST", "/api/v1/leads", json={
+            **common, "organization": "Lowveld Retail", "category": "Retail",
+            "evidence_note": "Published business directory record",
+        })
+        third = api_request("POST", "/api/v1/leads", json={
+            **common, "organization": "Witbank Civil Works", "category": "Construction",
+            "evidence_note": "Published business directory record",
+        })
+        self.assertEqual([first.status_code, second.status_code, third.status_code], [201, 201, 201])
+
+        filtered = api_request("GET", "/api/v1/leads/search", params={
+            "category": "construction", "province": "mpumalanga", "lead_type": "business",
+            "page": 1, "page_size": 1,
+        })
+        self.assertEqual(filtered.status_code, 200, filtered.text)
+        self.assertEqual(filtered.json()["total"], 2)
+        self.assertEqual(filtered.json()["page"], 1)
+        self.assertEqual(filtered.json()["page_size"], 1)
+        self.assertEqual(len(filtered.json()["items"]), 1)
+        self.assertEqual(filtered.json()["items"][0]["category"], "Construction")
+        self.assertEqual(filtered.json()["items"][0]["province"], "Mpumalanga")
+
+        next_page = api_request("GET", "/api/v1/leads/search", params={
+            "category": "Construction", "page": 2, "page_size": 1,
+        }).json()
+        self.assertEqual(next_page["total"], 2)
+        self.assertEqual(len(next_page["items"]), 1)
+        self.assertNotEqual(filtered.json()["items"][0]["id"], next_page["items"][0]["id"])
+        self.assertEqual(api_request("GET", "/api/v1/leads/categories").json(), ["Construction", "Retail"])
+
+    def test_lead_search_bounds_invalid_filters_and_urls(self):
+        too_many = api_request("GET", "/api/v1/leads/search", params={"page_size": 101})
+        self.assertEqual(too_many.status_code, 422)
+        long_query = api_request("GET", "/api/v1/leads/search", params={"q": "x" * 121})
+        self.assertEqual(long_query.status_code, 422)
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Validation test", "objective": "Validate fields", "lead_type": "business"
+        }).json()
+        invalid_url = api_request("POST", "/api/v1/leads", json={
+            "campaign_id": campaign["id"], "organization": "Unsafe URL Ltd",
+            "lead_type": "business", "source": "Test source", "source_url": "javascript:alert(1)",
+        })
+        self.assertEqual(invalid_url.status_code, 422)
+        invalid_status = api_request("POST", "/api/v1/leads", json={
+            "campaign_id": campaign["id"], "organization": "Bad Status Ltd",
+            "lead_type": "business", "source": "Test source",
+            "source_url": "https://source.example/1", "status": "hacked",
+        })
+        self.assertEqual(invalid_status.status_code, 422)
+
     def test_official_release_import_is_repeatable_and_amendments_update_by_ocid(self):
         first = {"ocid": "ocds-9t57fa-integration", "id": "release-1", "date": "2030-01-01T10:00:00Z", "tender": {"title": "Road resurfacing", "status": "active", "tenderPeriod": {"startDate": "2030-01-01", "endDate": "2030-06-01"}, "documents": [{"url": "https://data.etenders.gov.za/notice/one"}]}, "buyer": {"name": "Road agency"}}
         amended = {**first, "id": "release-2", "date": "2030-02-01T10:00:00Z", "tender": {**first["tender"], "title": "Road resurfacing amended", "tenderPeriod": {"startDate": "2030-01-01", "endDate": "2030-07-01"}}}
