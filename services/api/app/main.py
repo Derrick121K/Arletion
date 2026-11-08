@@ -409,6 +409,7 @@ def consumer_intake_status():
 @app.get("/api/v1/consumer-enquiries", response_model=ConsumerEnquiryPage)
 def get_consumer_enquiries(
     status: Literal["new", "contacted", "qualified", "converted", "disqualified", "suppressed"] | None = None,
+    category: Literal["debt_counselling", "debt_review_information", "budget_guidance", "general"] | None = None,
     province: str | None = Query(default=None, max_length=100),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=25, ge=1, le=100),
