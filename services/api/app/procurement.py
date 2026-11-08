@@ -237,12 +237,11 @@ def import_opportunities(session: Session, records: Iterable[dict[str, Any]]) ->
     return {"inserted": inserted, "updated": updated, "unchanged": unchanged, "stale_releases": stale,
             "duplicates_in_input": duplicates, "skipped": skipped}
 
-_SA_COMPANY_FORM = re.compile(
-    r"(?:\\b(?:PTY|PROPRIETARY)\\s+(?:LTD|LIMITED)\\b|\\(PTY\\)\\s*(?:LTD|LIMITED)\\b|"
-    r"\\bLIMITED\\b|\\bLTD\\.?\\b|\\bCLOSE CORPORATION\\b|\\bCC\\b|"
-    r"\\bINCORPORATED\\b|\\bINC\\.?\\b|\\bSOC\\s+LTD\\b|\\bNPC\\b|"
-    r"\\bNON-PROFIT COMPANY\\b|\\bCO-OPERATIVE\\b|\\bCOOPERATIVE\\b)$",
-    re.IGNORECASE,
+_SA_COMPANY_SUFFIXES = (
+    " (PTY) LTD", " (PTY) LIMITED", " PTY LTD", " PTY LIMITED",
+    " PROPRIETARY LIMITED", " LIMITED", " LTD", " CLOSE CORPORATION",
+    " CC", " INCORPORATED", " INC", " SOC LTD", " NPC",
+    " NON-PROFIT COMPANY", " CO-OPERATIVE", " COOPERATIVE",
 )
 
 def extract_awarded_business_suppliers(release: dict[str, Any], source_url: str, observed_at: datetime | None) -> list[dict[str, Any]]:
@@ -261,7 +260,7 @@ def extract_awarded_business_suppliers(release: dict[str, Any], source_url: str,
             if not isinstance(supplier, dict):
                 continue
             name = " ".join(str(supplier.get("name") or "").split())
-            if not name or not _SA_COMPANY_FORM.search(name.rstrip(" .")):
+            if not name or not any(name.upper().rstrip(" .").endswith(suffix) for suffix in _SA_COMPANY_SUFFIXES):
                 continue
             identifier = supplier.get("id")
             if isinstance(identifier, dict):
