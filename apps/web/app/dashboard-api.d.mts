@@ -16,6 +16,11 @@ export interface Lead {
   category: string | null;
   location: string;
   province: string | null;
+  website_url: string | null;
+  verification_status: "unverified" | "source_confirmed" | "officially_verified" | "needs_review";
+  verification_source: string | null;
+  verified_at: string | null;
+  source_updated_at: string | null;
   source: string;
   source_url: string;
   status: string;
@@ -69,7 +74,7 @@ export interface LeadPage {
 
 export function loadLeadPage(
   apiBaseUrl: string,
-  filters?: { q?: string; lead_type?: string; category?: string; status?: string; province?: string; page?: number; page_size?: number },
+  filters?: { q?: string; lead_type?: string; category?: string; status?: string; province?: string; verification_status?: string; page?: number; page_size?: number },
   fetcher?: typeof fetch,
 ): Promise<LeadPage>;
 
@@ -110,3 +115,24 @@ export interface ConsumerStatus {
 export function loadConsumerStatus(apiBaseUrl: string, fetcher?: typeof fetch): Promise<ConsumerStatus>;
 export function loadConsumerPage(apiBaseUrl: string, filters?: { category?: string; status?: string; province?: string; page?: number; page_size?: number }, fetcher?: typeof fetch): Promise<{items: ConsumerEnquiry[]; page: number; page_size: number; total: number}>;
 export function createCampaign(apiBaseUrl: string, campaign: { name: string; objective: string; lead_type: string; geography: string; status: string; criteria: Record<string, unknown> }, fetcher?: typeof fetch): Promise<Campaign>;
+
+export interface OpenStreetMapImportResult {
+  source: string;
+  attribution: string;
+  licence: string;
+  location: string;
+  province: string;
+  category: string;
+  radius_m: number;
+  matched: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  verification_status: "source_confirmed";
+  verification_scope: string;
+}
+export function importOpenStreetMapBusinesses(
+  apiBaseUrl: string,
+  request: { campaign_id: string; category: string; locality: string; province: string; latitude: number; longitude: number; radius_m: number; limit: number },
+  fetcher?: typeof fetch,
+): Promise<OpenStreetMapImportResult>;
