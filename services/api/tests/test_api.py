@@ -279,6 +279,12 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         })
         self.assertEqual(campaign.status_code, 201, campaign.text)
         self.assertEqual(campaign.json()["pipeline"], "consumer")
+        wrong_pipeline = api_request("POST", "/api/v1/leads", json={
+            "campaign_id": campaign.json()["id"], "organization": "Consumer Pipeline Leakage",
+            "lead_type": "business", "source": "Test source",
+            "source_url": "https://source.example/consumer-campaign",
+        })
+        self.assertEqual(wrong_pipeline.status_code, 409)
         settings = {
             "ARLETION_CONSUMER_INTAKE_ENABLED": "true",
             "ARLETION_CONSUMER_STORAGE_APPROVED": "true",
@@ -331,6 +337,9 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             self.assertEqual(withdrawn.status_code, 200)
             self.assertFalse(withdrawn.json()["marketing_consent"])
             self.assertTrue(withdrawn.json()["suppressed"])
+            api_request("POST", f"/api/v1/consumer-enquiries/{item['id']}/withdraw-marketing", headers={
+                "X-Arletion-Consumer-Access": settings["ARLETION_CONSUMER_ACCESS_KEY"],
+            })
 
             campaigns = api_request("GET", "/api/v1/campaigns?pipeline=consumer").json()
             self.assertEqual(len(campaigns), 1)
@@ -350,6 +359,9 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         self.assertNotIn("mpho@example.test", encrypted.email_ciphertext)
         self.assertIn(("electronic_direct_marketing", "withdrawn"), consent_rows)
         self.assertIn(("respond_to_consumer_enquiry", "granted"), consent_rows)
+        with self.engine.connect() as connection:
+            suppression_count = connection.execute(text("SELECT count(*) FROM suppression_records")).scalar_one()
+        self.assertEqual(suppression_count, 1)
 
     def test_consumer_enquiry_requires_explicit_processing_consent_and_active_consumer_campaign(self):
         invalid = api_request("POST", "/api/v1/consumer-enquiries", json={
