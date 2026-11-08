@@ -11,14 +11,20 @@ def intake_enabled() -> bool:
 
 
 def consumer_storage_ready() -> bool:
-    return (
+    configured = (
         intake_enabled()
         and os.getenv("ARLETION_CONSUMER_STORAGE_APPROVED", "false").strip().lower() == "true"
         and os.getenv("ARLETION_CONSUMER_RBAC_APPROVED", "false").strip().lower() == "true"
-        and bool(os.getenv("ARLETION_PII_ENCRYPTION_KEY"))
         and len(os.getenv("ARLETION_CONTACT_HASH_KEY", "")) >= 32
         and bool(os.getenv("ARLETION_CONSUMER_ACCESS_KEY"))
     )
+    if not configured:
+        return False
+    try:
+        _fernet()
+        return True
+    except RuntimeError:
+        return False
 
 
 def _fernet() -> Fernet:
