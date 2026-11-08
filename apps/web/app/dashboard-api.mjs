@@ -36,10 +36,10 @@ export async function loadDashboardData(apiBaseUrl, fetcher = fetch, timeoutMs =
   };
 }
 
-/** @param {string} apiBaseUrl @param {{q?:string,lead_type?:string,category?:string,status?:string,province?:string,page?:number,page_size?:number}} filters @param {typeof fetch} fetcher */
+/** @param {string} apiBaseUrl @param {{q?:string,lead_type?:string,category?:string,status?:string,province?:string,verification_status?:string,page?:number,page_size?:number}} filters @param {typeof fetch} fetcher */
 export async function loadLeadPage(apiBaseUrl, filters = {}, fetcher = fetch) {
   const params = new URLSearchParams({ page: String(filters.page ?? 1), page_size: String(filters.page_size ?? 25) });
-  for (const key of ["q", "lead_type", "category", "status", "province"]) {
+  for (const key of ["q", "lead_type", "category", "status", "province", "verification_status"]) {
     const value = filters[key];
     if (value) params.set(key, value);
   }
