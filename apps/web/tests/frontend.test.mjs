@@ -85,6 +85,31 @@ test("opportunities page offers bounded, resumable official Treasury imports", a
   assert.ok(page.includes("setReloadKey(value=>value+1)"));
 });
 
+test("dashboard data loader retries transient 429 responses and serializes initial reads", async () => {
+  const calls = [];
+  const counts = new Map();
+  const result = await loadDashboardData("http://127.0.0.1:8000", async (url) => {
+    const endpoint = url.split("/").at(-1);
+    calls.push(endpoint);
+    const count = (counts.get(endpoint) ?? 0) + 1;
+    counts.set(endpoint, count);
+    if (endpoint === "campaigns" && count === 1) {
+      return { ok: false, status: 429, headers: { get: (name) => name.toLowerCase() === "retry-after" ? "0" : null } };
+    }
+    const bodies = {
+      campaigns: [],
+      sources: [],
+      summary: { campaigns: 0, leads: 0, sources: 0, qualified: 0, demo_mode: false },
+      opportunities: { items: [], demo_mode: false, message: "No records" },
+    };
+    return { ok: true, status: 200, json: async () => bodies[endpoint] };
+  });
+
+  assert.deepEqual(calls, ["campaigns", "campaigns", "sources", "summary", "opportunities"]);
+  assert.deepEqual(result.campaigns, []);
+  assert.deepEqual(result.sources, []);
+  assert.deepEqual(result.opportunities, []);
+});
 test("dashboard data loader reads all API summaries", async () => {
   const calls = [];
   const result = await loadDashboardData("http://127.0.0.1:8000", async (url) => {
