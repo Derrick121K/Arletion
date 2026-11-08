@@ -1,17 +1,20 @@
 from datetime import date, datetime, timezone
 import hmac
 import os
+import re
+from datetime import timedelta
 from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 from .database import DEFAULT_TENANT_ID, db_health, get_session
-from .models import Campaign as CampaignRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry
+from .models import Campaign as CampaignRow, ConsentRecord, ConsumerEnquiry as ConsumerEnquiryRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry, SuppressionRecord
+from .privacy import consumer_storage_ready, contact_fingerprint, decrypt_contact, encrypt_contact, valid_consumer_access
 from .procurement import import_opportunities, parse_import
 
 app = FastAPI(title="Arletion API", version="0.2.0", description="PostgreSQL-backed Arletion workspace and official OCDS import.")
