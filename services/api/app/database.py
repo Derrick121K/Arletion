@@ -65,8 +65,8 @@ def db_health() -> dict[str, str | bool]:
             if missing:
                 return {"configured": True, "connected": False, "detail": f"Database schema is incomplete; missing tables: {', '.join(sorted(missing))}. Run `alembic upgrade head`."}
             version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
-            if version != "0002_seed_reference_rows":
-                return {"configured": True, "connected": False, "detail": f"Database migration revision is {version or 'unset'}; expected 0002_seed_reference_rows. Run `alembic upgrade head`."}
+            if version != "0003_lead_filter_indexes":
+                return {"configured": True, "connected": False, "detail": f"Database migration revision is {version or 'unset'}; expected 0003_lead_filter_indexes. Run `alembic upgrade head`."}
         return {"configured": True, "connected": True, "detail": "PostgreSQL connection, schema and migration revision verified"}
     except SQLAlchemyError as error:
         return {"configured": True, "connected": False, "detail": f"{error.__class__.__name__}: verify database credentials and migrations"}
