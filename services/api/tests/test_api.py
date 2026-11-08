@@ -11,6 +11,7 @@ from app.database import engine_for_url, normalize_database_url
 from app.main import app
 from app.models import Base
 from app.procurement import normalize_record, parse_import
+from app.business_sources import OSM_ATTRIBUTION, normalize_osm_businesses, overpass_query
 
 
 def api_request(method: str, path: str, **kwargs):
@@ -254,6 +255,120 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             "source_url": "https://source.example/1", "status": "hacked",
         })
         self.assertEqual(invalid_status.status_code, 422)
+
+    def test_openstreetmap_query_is_category_scoped_and_bounded(self):
+        query = overpass_query("Construction", -25.8762, 29.21, 10000, 100)
+        self.assertIn("around:10000,-25.876200,29.210000", query)
+        self.assertIn('"shop"~"^(building_materials|hardware|trade|doityourself)$",i', query)
+        self.assertIn('"craft"~"', query)
+        self.assertTrue(query.endswith("out center tags meta 100;"))
+        with self.assertRaises(ValueError):
+            overpass_query("Unknown", -25.8762, 29.21, 10000, 100)
+
+    def test_openstreetmap_normalizer_keeps_only_named_business_evidence(self):
+        rows = normalize_osm_businesses({
+            "elements": [
+                {
+                    "type": "node", "id": 123, "lat": -25.8762, "lon": 29.21,
+                    "timestamp": "2026-11-08T09:00:00Z",
+                    "tags": {
+                        "name": "Witbank Building Supplies", "shop": "building_materials",
+                        "website": "https://www.example.co.za/contact",
+                        "contact:phone": "+27130000000", "contact:email": "owner@example.test",
+                        "addr:suburb": "CBD",
+                    },
+                },
+                {"type": "node", "id": 124, "tags": {"shop": "hardware"}},
+                {"type": "way", "id": 123, "tags": {"name": "Witbank Building Supplies", "shop": "hardware"}},
+            ]
+        }, "Building materials", "eMalahleni", "Mpumalanga")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["external_id"], "node/123")
+        self.assertEqual(rows[0]["source_url"], "https://www.openstreetmap.org/node/123")
+        self.assertEqual(rows[0]["website_domain"], "www.example.co.za")
+        self.assertEqual(rows[0]["locality"], "CBD")
+        self.assertEqual(rows[0]["province"], "Mpumalanga")
+        self.assertEqual(rows[0]["tags"], {"shop": "building_materials", "addr:suburb": "CBD"})
+        self.assertNotIn("contact:phone", rows[0]["tags"])
+        self.assertNotIn("contact:email", rows[0]["tags"])
+        self.assertEqual(OSM_ATTRIBUTION, "© OpenStreetMap contributors · ODbL 1.0")
+
+    def test_openstreetmap_import_creates_source_confirmed_leads_and_updates_existing_rows(self):
+        campaign = api_request("POST", "/api/v1/campaigns", json={
+            "name": "eMalahleni building suppliers", "objective": "Find local building suppliers",
+            "lead_type": "business", "geography": "eMalahleni, Mpumalanga",
+        })
+        self.assertEqual(campaign.status_code, 201, campaign.text)
+        business = {
+            "external_id": "node/123456", "name": "Witbank Building Supplies",
+            "category": "Building materials", "locality": "eMalahleni", "province": "Mpumalanga",
+            "website_domain": "www.example.co.za", "latitude": -25.8762, "longitude": 29.21,
+            "source_url": "https://www.openstreetmap.org/node/123456",
+            "source_updated_at": None,
+            "tags": {"shop": "building_materials"},
+        }
+        body = {
+            "campaign_id": campaign.json()["id"], "category": "Building materials",
+            "locality": "eMalahleni", "province": "Mpumalanga",
+            "latitude": -25.8762, "longitude": 29.21, "radius_m": 10000, "limit": 50,
+        }
+        with patch("app.main.fetch_osm_businesses", return_value=[business]) as fetch:
+            first = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["inserted"], 1)
+        self.assertEqual(first.json()["verification_status"], "source_confirmed")
+        self.assertIn("not CIPC registration", first.json()["verification_scope"])
+        fetch.assert_called_once_with("Building materials", -25.8762, 29.21, 10000, "eMalahleni", "Mpumalanga", 50)
+
+        leads = api_request("GET", "/api/v1/leads/search", params={
+            "category": "Building materials", "verification_status": "source_confirmed",
+        })
+        self.assertEqual(leads.status_code, 200, leads.text)
+        self.assertEqual(leads.json()["total"], 1)
+        item = leads.json()["items"][0]
+        self.assertEqual(item["organization"], "Witbank Building Supplies")
+        self.assertEqual(item["source"], "OpenStreetMap Business Directory")
+        self.assertEqual(item["source_url"], "https://www.openstreetmap.org/node/123456")
+        self.assertEqual(item["verification_status"], "source_confirmed")
+        self.assertEqual(item["verification_source"], "OpenStreetMap")
+        self.assertEqual(item["website_url"], "https://www.example.co.za")
+        self.assertNotIn("phone", item)
+        self.assertNotIn("email", item)
+
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "UPDATE source_registry SET last_synced_at = NULL WHERE name = 'OpenStreetMap Business Directory'"
+            ))
+        with patch("app.main.fetch_osm_businesses", return_value=[business]):
+            second = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["inserted"], 0)
+        self.assertEqual(second.json()["updated"], 1)
+        self.assertEqual(api_request("GET", "/api/v1/leads/search", params={
+            "category": "Building materials", "verification_status": "source_confirmed",
+        }).json()["total"], 1)
+
+    def test_openstreetmap_import_blocks_wrong_campaign_and_applies_rate_limit(self):
+        procurement = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Tender opportunities", "objective": "Procurement", "lead_type": "procurement",
+        }).json()
+        body = {
+            "campaign_id": procurement["id"], "category": "Construction",
+            "latitude": -25.8762, "longitude": 29.21,
+        }
+        wrong = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+        self.assertEqual(wrong.status_code, 409)
+
+        business = api_request("POST", "/api/v1/campaigns", json={
+            "name": "Construction businesses", "objective": "Business outreach", "lead_type": "business",
+        }).json()
+        body["campaign_id"] = business["id"]
+        with patch("app.main.fetch_osm_businesses", return_value=[]):
+            first = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+            limited = api_request("POST", "/api/v1/leads/import/openstreetmap", json=body)
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(first.json()["matched"], 0)
+        self.assertEqual(limited.status_code, 429)
 
     def test_consumer_intake_is_disabled_until_storage_and_encryption_are_approved(self):
         with patch.dict(os.environ, {
