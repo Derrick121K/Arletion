@@ -139,3 +139,16 @@ export async function recordLeadVerification(apiBaseUrl, leadId, payload, fetche
   if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : `Verification record failed with HTTP ${response.status}.`);
   return result;
 }
+
+
+/** @param {string} apiBaseUrl @param {{campaign_id:string,start_page:number,page_count:number,date_from:string,date_to:string,max_releases:number}} request @param {typeof fetch} fetcher */
+export async function importFreeAwardedSupplierLeads(apiBaseUrl, request, fetcher = fetch) {
+  const batch = await importOfficialOpportunityPages(apiBaseUrl, {
+    start_page: request.start_page, page_size: 100, page_count: request.page_count,
+    date_from: request.date_from, date_to: request.date_to,
+  }, fetcher);
+  const suppliers = await importEtenderAwardedSuppliers(apiBaseUrl, {
+    campaign_id: request.campaign_id, max_releases: request.max_releases,
+  }, fetcher);
+  return { batch, suppliers };
+}
