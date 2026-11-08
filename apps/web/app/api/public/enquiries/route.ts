@@ -24,6 +24,7 @@ export async function POST(request: NextRequest) {
   attempts.set(key, current && current.resetAt > now
     ? { ...current, count: current.count + 1 }
     : { count: 1, resetAt: now + WINDOW_MS });
+  if (attempts.size > 5000) attempts.delete(attempts.keys().next().value!);
 
   const raw = await request.text();
   if (raw.length > 12_000) return NextResponse.json({ detail: "Submission is too large." }, { status: 413 });
