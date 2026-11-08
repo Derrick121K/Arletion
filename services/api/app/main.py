@@ -449,7 +449,7 @@ def import_openstreetmap_businesses(payload: OpenStreetMapImportWrite, session: 
     except RuntimeError as error:
         source.last_error = str(error)
         session.commit()
-        raise HTTPException(status_code=502, detail=str(error)) from error
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
     inserted = updated = skipped = 0
     for item in businesses:
