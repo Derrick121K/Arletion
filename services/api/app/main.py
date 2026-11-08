@@ -126,7 +126,7 @@ class PublicConsumerEnquiryWrite(BaseModel):
             raise ValueError("Provide a phone number or email address.")
         if self.phone and not re.fullmatch(r"[+0-9() .-]{7,32}", self.phone.strip()):
             raise ValueError("Provide a valid phone number.")
-        if self.email and not re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", self.email.strip()):
+        if self.email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", self.email.strip()):
             raise ValueError("Provide a valid email address.")
         if self.preferred_channel == "email" and not self.email:
             raise ValueError("An email address is required for the selected contact channel.")
