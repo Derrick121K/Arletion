@@ -164,6 +164,7 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
             connection.execute(text("DELETE FROM source_registry WHERE id NOT IN ('00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', '00000000-0000-0000-0000-000000000004')"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL WHERE id = '00000000-0000-0000-0000-000000000002'"))
             connection.execute(text("UPDATE source_registry SET permitted_use = 'approved', enabled = TRUE, last_error = NULL, last_synced_at = NULL WHERE id = '00000000-0000-0000-0000-000000000003'"))
+            connection.execute(text("UPDATE source_registry SET permitted_use = 'review_required', enabled = FALSE, last_error = NULL, last_synced_at = NULL WHERE id = '00000000-0000-0000-0000-000000000004'"))
 
     def test_source_can_be_explicitly_approved_after_manual_review(self):
         response = api_request(
