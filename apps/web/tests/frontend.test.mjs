@@ -353,3 +353,18 @@ test("public enquiry form and API routes are excluded from private workspace Bas
   assert.match(route, /request\.nextUrl\.origin/);
   assert.match(route, /Too many submissions/);
 });
+
+
+test("consumer dashboard exposes free Tally webhook import setup and strict consent fields", async () => {
+  const page = await read("app/page.tsx");
+  assert.match(page, /Free Tally consumer lead import/);
+  assert.match(page, /api\/v1\/webhooks\/tally/);
+  assert.match(page, /ARLETION_TALLY_WEBHOOK_SECRET/);
+  assert.match(page, /Accept signed Tally webhook submissions/);
+  assert.match(page, /tally_intake/);
+  assert.match(page, /Full name/);
+  assert.match(page, /18\+ confirmation/);
+  const types = await read("app/dashboard-api.d.mts");
+  assert.match(types, /tally_webhook_configured/);
+  assert.match(types, /tally_webhook_enabled/);
+});

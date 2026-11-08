@@ -1,15 +1,19 @@
 from datetime import date, datetime, timezone
+import base64
+import hashlib
 import hmac
+import json
 import os
 import re
 from datetime import timedelta
 from typing import Any, Literal
 from urllib.parse import urlsplit
 from uuid import UUID
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 from .database import DEFAULT_TENANT_ID, ETENDERS_SOURCE_ID, db_health, get_session
@@ -32,7 +36,7 @@ app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials
 async def require_api_key_in_protected_deployments(request, call_next):
     """Require a server-side bearer key for data APIs in configured deployments."""
     required = os.getenv("ARLETION_REQUIRE_API_KEY", "false").strip().lower() == "true"
-    if required and request.method != "OPTIONS" and request.url.path.startswith("/api/v1/"):
+    if required and request.method != "OPTIONS" and request.url.path.startswith("/api/v1/") and request.url.path != "/api/v1/webhooks/tally":
         expected = os.getenv("ARLETION_API_KEY", "")
         if not expected:
             return JSONResponse(
@@ -680,6 +684,227 @@ def import_openstreetmap_businesses(payload: OpenStreetMapImportWrite, session: 
     }
 
 
+def _tally_label(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _tally_value(fields: list[dict[str, Any]], labels: set[str]) -> Any:
+    wanted = {_tally_label(label) for label in labels}
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        if _tally_label(str(field.get("label") or "")) in wanted:
+            value = field.get("value")
+            options = field.get("options")
+            if isinstance(value, list) and isinstance(options, list):
+                option_text = {
+                    str(option.get("id")): str(option.get("text") or "")
+                    for option in options if isinstance(option, dict) and option.get("id") is not None
+                }
+                return [option_text.get(str(item), str(item)) for item in value]
+            return value
+    return None
+
+
+def _tally_yes(value: Any) -> bool:
+    accepted = {"yes", "true", "checked", "agree", "i agree", "i consent", "confirmed", "i confirm"}
+    values = value if isinstance(value, list) else [value]
+    return any(
+        item is True or (isinstance(item, str) and (
+            item.strip().casefold() in accepted
+            or "i agree" in item.casefold()
+            or "i consent" in item.casefold()
+            or "i confirm" in item.casefold()
+        ))
+        for item in values
+    )
+
+
+def _tally_category(value: Any) -> str:
+    text = " ".join(str(item) for item in (value if isinstance(value, list) else [value]) if item is not None)
+    key = _tally_label(text)
+    categories = {
+        "considering debt review": "considering_debt_review",
+        "considering debt counselling": "considering_debt_review",
+        "already under debt review": "already_under_review",
+        "currently under debt review": "already_under_review",
+        "application pending": "application_pending",
+        "i have applied and am waiting for feedback": "application_pending",
+        "debt review assistance": "debt_review_assistance",
+        "debt review information": "debt_review_information",
+        "completed debt review": "completed_debt_review",
+        "debt counselling": "debt_counselling",
+        "budget guidance": "budget_guidance",
+        "general enquiry": "general",
+        "general": "general",
+    }
+    if key not in categories:
+        raise HTTPException(status_code=422, detail="Tally submission has an unknown debt-review situation.")
+    return categories[key]
+
+
+def _tally_enquiry(fields: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+    full_name = _tally_value(fields, {"Full name", "Name"})
+    phone = _tally_value(fields, {"Phone number", "Phone", "Mobile number"})
+    email = _tally_value(fields, {"Email address", "Email"})
+    province = _tally_value(fields, {"Province"})
+    locality = _tally_value(fields, {"Town / locality", "Town", "Locality", "City"})
+    channel = _tally_value(fields, {"Preferred contact channel", "Preferred response channel"})
+    category_value = _tally_value(fields, {"Debt-review situation", "Debt review situation", "What best describes your situation"})
+    age = _tally_value(fields, {"I confirm I am 18 years or older", "I am 18 years or older", "Age confirmation"})
+    processing = _tally_value(fields, {
+        "I consent to Arletion processing my details to respond to this enquiry",
+        "Processing consent",
+        "Consent to process this enquiry",
+    })
+    marketing = _tally_value(fields, {
+        "I agree to receive optional marketing messages",
+        "Optional marketing consent",
+        "Marketing consent",
+    })
+    if not _tally_yes(age):
+        raise HTTPException(status_code=422, detail="Tally submission is missing explicit 18+ confirmation.")
+    if not _tally_yes(processing):
+        raise HTTPException(status_code=422, detail="Tally submission is missing explicit processing consent.")
+    if not isinstance(full_name, str) or len(full_name.strip()) < 2:
+        raise HTTPException(status_code=422, detail="Tally submission is missing a valid full name.")
+    if phone is not None and not isinstance(phone, str):
+        phone = str(phone)
+    if email is not None and not isinstance(email, str):
+        email = str(email)
+    if province is not None and not isinstance(province, str):
+        province = str(province)
+    if locality is not None and not isinstance(locality, str):
+        locality = str(locality)
+    if not isinstance(channel, str):
+        raise HTTPException(status_code=422, detail="Tally submission is missing a preferred contact channel.")
+    channel_key = _tally_label(channel)
+    if channel_key not in {"phone", "whatsapp", "email"}:
+        raise HTTPException(status_code=422, detail="Tally submission has an unsupported contact channel.")
+    category = _tally_category(category_value)
+    enquiry = {
+        "full_name": full_name.strip(),
+        "phone": phone.strip() if phone and phone.strip() else None,
+        "email": email.strip() if email and email.strip() else None,
+        "province": province.strip() if province and province.strip() else None,
+        "locality": locality.strip() if locality and locality.strip() else None,
+        "preferred_channel": channel_key,
+        "category": category,
+        "source": "tally_webhook",
+        "processing_consent": True,
+        "marketing_consent": _tally_yes(marketing),
+        "notice_version": os.getenv("ARLETION_TALLY_NOTICE_VERSION", "tally-debt-review-v1"),
+    }
+    return enquiry, category
+
+
+@app.post("/api/v1/webhooks/tally")
+async def receive_tally_webhook(
+    request: Request,
+    tally_signature: str | None = Header(default=None, alias="Tally-Signature"),
+    session: Session = Depends(get_session),
+):
+    if os.getenv("ARLETION_TALLY_WEBHOOK_ENABLED", "false").strip().lower() != "true":
+        raise HTTPException(status_code=503, detail="Tally webhook import is disabled.")
+    secret = os.getenv("ARLETION_TALLY_WEBHOOK_SECRET", "")
+    configured_form = os.getenv("ARLETION_TALLY_FORM_ID", "")
+    configured_campaign = os.getenv("ARLETION_TALLY_CAMPAIGN_ID", "")
+    if not secret or not configured_form or not configured_campaign:
+        raise HTTPException(status_code=503, detail="Tally webhook configuration is incomplete.")
+    if not tally_signature:
+        raise HTTPException(status_code=401, detail="Tally signature is required.")
+    raw_body = await request.body()
+    if len(raw_body) > 1_000_000:
+        raise HTTPException(status_code=413, detail="Tally webhook payload exceeds 1 MB.")
+    try:
+        payload = json.loads(raw_body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Tally webhook payload must be valid JSON.") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Tally webhook payload must be a JSON object.")
+    canonical = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    expected = base64.b64encode(
+        hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).digest()
+    ).decode("ascii")
+    canonical_expected = base64.b64encode(
+        hmac.new(secret.encode("utf-8"), canonical, hashlib.sha256).digest()
+    ).decode("ascii")
+    if not (hmac.compare_digest(expected, tally_signature.strip())
+            or hmac.compare_digest(canonical_expected, tally_signature.strip())):
+        raise HTTPException(status_code=401, detail="Tally webhook signature is invalid.")
+    if payload.get("eventType") != "FORM_RESPONSE":
+        raise HTTPException(status_code=422, detail="Only Tally FORM_RESPONSE events are accepted.")
+    data = payload.get("data")
+    if not isinstance(data, dict) or str(data.get("formId") or "") != configured_form:
+        raise HTTPException(status_code=409, detail="Tally form ID does not match the configured Arletion form.")
+    event_id = str(payload.get("eventId") or "").strip()
+    fields = data.get("fields")
+    if not event_id or len(event_id) > 160 or not isinstance(fields, list):
+        raise HTTPException(status_code=422, detail="Tally event ID or fields are missing.")
+    if not consumer_storage_ready():
+        raise HTTPException(status_code=503, detail="Consumer storage and privacy controls are not ready.")
+    source = session.scalar(select(SourceRegistry).where(
+        SourceRegistry.name == "Tally Voluntary Consumer Enquiry Webhook"
+    ))
+    if source is None or not source.enabled or source.permitted_use != "approved":
+        raise HTTPException(status_code=409, detail="Review and enable the Tally webhook in Source Registry before importing.")
+    existing = session.scalar(select(SourceRecord.id).where(
+        SourceRecord.source_id == source.id,
+        SourceRecord.external_id == event_id,
+        SourceRecord.record_type == "tally_webhook_event",
+    ))
+    if existing:
+        return {"accepted": True, "duplicate_event": True, "created": False}
+    try:
+        campaign_id = UUID(configured_campaign)
+    except ValueError:
+        raise HTTPException(status_code=503, detail="ARLETION_TALLY_CAMPAIGN_ID is invalid.") from None
+    campaign = session.scalar(select(CampaignRow).where(
+        CampaignRow.id == campaign_id,
+        CampaignRow.tenant_id == DEFAULT_TENANT_ID,
+        CampaignRow.lead_type == "consumer_enquiry",
+        CampaignRow.status == "active",
+    ))
+    if campaign is None or campaign.criteria.get("tally_intake") is not True:
+        raise HTTPException(status_code=409, detail="The configured active consumer campaign has not enabled Tally intake.")
+    enquiry_payload, category = _tally_enquiry(fields)
+    consumer_payload = ConsumerEnquiryWrite(campaign_id=campaign.id, **enquiry_payload)
+    receipt = SourceRecord(
+        source_id=source.id,
+        external_id=event_id,
+        record_type="tally_webhook_event",
+        source_url=f"https://tally.so/forms/{configured_form}",
+        raw_payload={
+            "event_type": "FORM_RESPONSE",
+            "form_id": configured_form,
+        },
+    )
+    session.add(receipt)
+    try:
+        session.flush()
+    except IntegrityError:
+        session.rollback()
+        duplicate = session.scalar(select(SourceRecord.id).where(
+            SourceRecord.source_id == source.id,
+            SourceRecord.external_id == event_id,
+            SourceRecord.record_type == "tally_webhook_event",
+        ))
+        if duplicate:
+            return {"accepted": True, "duplicate_event": True, "created": False}
+        raise
+    created = True
+    try:
+        create_consumer_enquiry(consumer_payload, session)
+    except HTTPException as error:
+        if error.status_code != 409:
+            session.rollback()
+            raise
+        created = False
+        receipt.raw_payload = {**(receipt.raw_payload or {}), "created": False}
+        session.commit()
+    return {"accepted": True, "duplicate_event": False, "created": created, "category": category}
+
+
 @app.get("/api/v1/consumer-enquiries/status")
 def consumer_intake_status(session: Session = Depends(get_session)):
     public_campaigns = session.scalars(select(CampaignRow).where(
@@ -687,6 +912,21 @@ def consumer_intake_status(session: Session = Depends(get_session)):
         CampaignRow.lead_type == "consumer_enquiry",
         CampaignRow.status == "active",
     )).all()
+    try:
+        tally_campaign_id = UUID(os.getenv("ARLETION_TALLY_CAMPAIGN_ID", ""))
+    except ValueError:
+        tally_campaign_id = None
+    tally_campaign = session.get(CampaignRow, tally_campaign_id) if tally_campaign_id else None
+    tally_source = session.scalar(select(SourceRegistry).where(SourceRegistry.name == "Tally Voluntary Consumer Enquiry Webhook"))
+    tally_webhook_ready = (
+        os.getenv("ARLETION_TALLY_WEBHOOK_ENABLED", "false").lower() == "true"
+        and bool(os.getenv("ARLETION_TALLY_WEBHOOK_SECRET"))
+        and bool(os.getenv("ARLETION_TALLY_FORM_ID"))
+        and consumer_storage_ready()
+        and tally_source is not None and tally_source.enabled and tally_source.permitted_use == "approved"
+        and tally_campaign is not None and tally_campaign.lead_type == "consumer_enquiry"
+        and tally_campaign.status == "active" and tally_campaign.criteria.get("tally_intake") is True
+    )
     public_form = (
         os.getenv("ARLETION_PUBLIC_CONSUMER_FORM_ENABLED", "false").lower() == "true"
         and consumer_storage_ready()
@@ -700,6 +940,9 @@ def consumer_intake_status(session: Session = Depends(get_session)):
         "deduplication_key_configured": len(os.getenv("ARLETION_CONTACT_HASH_KEY", "")) >= 32,
         "separate_contact_access_configured": bool(os.getenv("ARLETION_CONSUMER_ACCESS_KEY")),
         "public_form": public_form,
+        "tally_webhook_configured": bool(os.getenv("ARLETION_TALLY_WEBHOOK_SECRET") and os.getenv("ARLETION_TALLY_FORM_ID") and os.getenv("ARLETION_TALLY_CAMPAIGN_ID")),
+        "tally_webhook_enabled": tally_webhook_ready,
+        "tally_webhook_endpoint": "/api/v1/webhooks/tally",
         "note": "Public intake requires durable storage, encryption, separate access controls, an active public campaign and the explicit public-form switch.",
     }
 
