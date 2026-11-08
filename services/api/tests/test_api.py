@@ -366,6 +366,7 @@ class PostgreSQLIntegrationTests(unittest.TestCase):
         settings = {
             "ARLETION_CONSUMER_INTAKE_ENABLED": "true",
             "ARLETION_CONSUMER_STORAGE_APPROVED": "true",
+            "ARLETION_CONSUMER_RBAC_APPROVED": "true",
             "ARLETION_PII_ENCRYPTION_KEY": Fernet.generate_key().decode(),
             "ARLETION_CONTACT_HASH_KEY": "test-contact-hash-key-that-is-at-least-32-bytes",
             "ARLETION_CONSUMER_ACCESS_KEY": "separate-consumer-contact-secret",
