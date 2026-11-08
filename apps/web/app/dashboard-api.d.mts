@@ -110,6 +110,9 @@ export interface ConsumerStatus {
   deduplication_key_configured: boolean;
   separate_contact_access_configured: boolean;
   public_form: boolean;
+  tally_webhook_configured: boolean;
+  tally_webhook_enabled: boolean;
+  tally_webhook_endpoint: string;
   note: string;
 }
 export function loadConsumerStatus(apiBaseUrl: string, fetcher?: typeof fetch): Promise<ConsumerStatus>;
