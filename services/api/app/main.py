@@ -12,10 +12,10 @@ from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
-from .database import DEFAULT_TENANT_ID, db_health, get_session
+from .database import DEFAULT_TENANT_ID, ETENDERS_SOURCE_ID, db_health, get_session
 from .models import Campaign as CampaignRow, ConsentRecord, ConsumerEnquiry as ConsumerEnquiryRow, Lead as LeadRow, Opportunity as OpportunityRow, Organization, SourceRecord, SourceRegistry, SuppressionRecord
 from .privacy import consumer_storage_ready, contact_fingerprint, decrypt_contact, encrypt_contact, valid_consumer_access
-from .procurement import import_opportunities, parse_import
+from .procurement import extract_awarded_business_suppliers, import_opportunities, parse_import
 from .business_sources import OSM_ATTRIBUTION, OSM_SOURCE, fetch_osm_businesses
 
 app = FastAPI(title="Arletion API", version="0.2.0", description="PostgreSQL-backed Arletion workspace and official OCDS import.")
@@ -184,6 +184,11 @@ class OpenStreetMapImportWrite(BaseModel):
     longitude: float = Field(default=29.21, ge=-180, le=180)
     radius_m: int = Field(default=10000, ge=1000, le=15000)
     limit: int = Field(default=100, ge=1, le=200)
+
+
+class EtenderAwardSupplierImportWrite(BaseModel):
+    campaign_id: UUID
+    max_releases: int = Field(default=500, ge=1, le=2000)
 
 
 class SourceWrite(BaseModel):
@@ -754,6 +759,127 @@ def create_lead(payload: LeadWrite, session: Session = Depends(get_session)):
         evidence.source_url=payload.source_url; evidence.raw_payload={"lead_id":str(row.id),"source_external_id":payload.external_id,"evidence_note":payload.evidence_note}
     session.commit(); session.refresh(row)
     return get_leads(q=payload.organization,lead_type=None,session=session)[0]
+@app.post("/api/v1/leads/import/etender-awarded-suppliers")
+def import_etender_awarded_suppliers(payload: EtenderAwardSupplierImportWrite, session: Session = Depends(get_session)):
+    source = session.get(SourceRegistry, ETENDERS_SOURCE_ID) or session.scalar(
+        select(SourceRegistry).where(SourceRegistry.name == "National Treasury eTender Transparency Portal")
+    )
+    if source is None or not source.enabled or source.permitted_use != "approved":
+        raise HTTPException(status_code=409, detail="Approve the official National Treasury eTender source before importing awarded suppliers.")
+    campaign = session.scalar(select(CampaignRow).where(
+        CampaignRow.id == payload.campaign_id,
+        CampaignRow.tenant_id == DEFAULT_TENANT_ID,
+    ))
+    if campaign is None:
+        raise HTTPException(status_code=404, detail="Business or procurement campaign not found.")
+    if campaign.lead_type not in {"business", "procurement", "partnership"}:
+        raise HTTPException(status_code=409, detail="Awarded suppliers must use a business, procurement or partnership campaign.")
+    releases = session.scalars(
+        select(SourceRecord).where(
+            SourceRecord.source_id == source.id,
+            SourceRecord.record_type == "ocds_release",
+        ).order_by(SourceRecord.source_updated_at.desc().nullslast(), SourceRecord.observed_at.desc())
+        .limit(payload.max_releases)
+    ).all()
+    suppliers = {}
+    skipped = 0
+    for release in releases:
+        raw = release.raw_payload if isinstance(release.raw_payload, dict) else {}
+        items = extract_awarded_business_suppliers(raw, release.source_url, release.source_updated_at)
+        if not items:
+            skipped += 1
+        for item in items:
+            # Prefer the most recently published award evidence for a supplier.
+            prior = suppliers.get(item["supplier_key"].casefold())
+            if prior is None or (item["source_updated_at"] and (
+                prior["source_updated_at"] is None or item["source_updated_at"] > prior["source_updated_at"]
+            )):
+                suppliers[item["supplier_key"].casefold()] = item
+
+    now = datetime.now(timezone.utc)
+    inserted = updated = 0
+    for item in suppliers.values():
+        normalized = f"{' '.join(item['name'].casefold().split())}::etender::{item['supplier_key'].casefold()}"
+        organization = session.scalar(select(Organization).where(
+            Organization.normalized_name == normalized,
+            Organization.country_code == "ZA",
+        ))
+        if organization is None:
+            organization = Organization(
+                canonical_name=item["name"], normalized_name=normalized, country_code="ZA",
+                business_category=item["category"],
+            )
+            session.add(organization)
+            session.flush()
+        elif item["category"] and item["category"] != "Government supplier":
+            organization.business_category = item["category"]
+
+        lead = session.scalar(select(LeadRow).where(
+            LeadRow.tenant_id == DEFAULT_TENANT_ID,
+            LeadRow.campaign_id == campaign.id,
+            LeadRow.organization_id == organization.id,
+        ))
+        reason = (
+            f"Named as an award supplier in National Treasury OCDS release {item['ocid']} "
+            f"(award {item['award_id'] or 'ID not supplied'}). Confirm current CSD status before outreach."
+        )
+        if lead is None:
+            lead = LeadRow(
+                tenant_id=DEFAULT_TENANT_ID, campaign_id=campaign.id,
+                organization_id=organization.id, lead_type=campaign.lead_type,
+                status="new", score=55, qualification_reason=reason,
+                verification_status="source_confirmed",
+                verification_source="National Treasury eTender OCDS award",
+                verified_at=now,
+            )
+            session.add(lead)
+            session.flush()
+            inserted += 1
+        else:
+            lead.last_seen_at = now
+            lead.verification_status = "source_confirmed"
+            lead.verification_source = "National Treasury eTender OCDS award"
+            lead.verified_at = now
+            lead.qualification_reason = reason
+            updated += 1
+
+        evidence = session.scalar(select(SourceRecord).where(
+            SourceRecord.source_id == source.id,
+            SourceRecord.external_id == str(lead.id),
+            SourceRecord.record_type == "lead_evidence",
+        ))
+        evidence_payload = {
+            "lead_id": str(lead.id),
+            "supplier_identifier": item["supplier_key"],
+            "ocid": item["ocid"],
+            "award_id": item["award_id"],
+            "tender_title": item["tender_title"],
+            "source_evidence": item["source_evidence"],
+        }
+        if evidence is None:
+            session.add(SourceRecord(
+                source_id=source.id, external_id=str(lead.id), record_type="lead_evidence",
+                source_url=item["source_url"], source_updated_at=item["source_updated_at"],
+                raw_payload=evidence_payload,
+            ))
+        else:
+            evidence.source_url = item["source_url"]
+            evidence.source_updated_at = item["source_updated_at"]
+            evidence.raw_payload = evidence_payload
+
+    session.commit()
+    return {
+        "source": "National Treasury eTender Transparency Portal",
+        "matched_releases": len(releases),
+        "unique_awarded_companies": len(suppliers),
+        "inserted": inserted,
+        "updated": updated,
+        "skipped_releases_without_company_awards": skipped,
+        "verification_status": "source_confirmed",
+        "verification_scope": "Named as a company-form supplier in a published OCDS award; current CSD registration, tax status and trading activity are not implied.",
+    }
+
+
 @app.get("/api/v1/sources", response_model=list[Source])
 def get_sources(session: Session = Depends(get_session)):
     result=[]
